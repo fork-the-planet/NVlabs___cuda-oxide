@@ -9,6 +9,7 @@ This section walks through installing cuda-oxide, creating a project, writing a 
 If you haven't already, install the build tool:
 
 ```bash
+rm -f $HOME/.cargo/cuda-oxide/librustc_codegen_cuda.so # stale artifact can cause error
 cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 

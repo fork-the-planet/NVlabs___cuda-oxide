@@ -158,6 +158,7 @@ The two extra components are required by the codegen backend:
 **For use outside the repo** (your own projects):
 
 ```bash
+rm -f $HOME/.cargo/cuda-oxide/librustc_codegen_cuda.so # stale artifact can cause error
 cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 

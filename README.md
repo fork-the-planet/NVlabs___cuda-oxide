@@ -135,6 +135,7 @@ Inside the cuda-oxide repo, `cargo oxide` works out of the box via a workspace a
 For use outside the repo (your own projects):
 
 ```bash
+rm -f $HOME/.cargo/cuda-oxide/librustc_codegen_cuda.so # stale artifact can cause error
 cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 

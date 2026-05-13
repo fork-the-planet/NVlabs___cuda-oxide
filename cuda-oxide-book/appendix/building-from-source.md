@@ -127,6 +127,7 @@ build process. `cargo-oxide` handles building it transparently.
 pipeline. Inside the repo, it works via a workspace alias. For standalone use:
 
 ```bash
+rm -f $HOME/.cargo/cuda-oxide/librustc_codegen_cuda.so # stale artifact can cause error
 cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 

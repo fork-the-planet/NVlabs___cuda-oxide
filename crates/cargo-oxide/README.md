@@ -11,6 +11,7 @@ Replaces the previous `xtask` pattern with a proper cargo subcommand that works 
 **External users**:
 
 ```bash
+rm -f $HOME/.cargo/cuda-oxide/librustc_codegen_cuda.so # stale artifact can cause error
 cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
