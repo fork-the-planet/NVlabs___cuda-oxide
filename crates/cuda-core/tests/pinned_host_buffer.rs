@@ -98,3 +98,30 @@ fn pinned_host_buffer_async_copy_can_be_synchronized_later() {
     assert_eq!(output.as_slice(), input.as_slice());
 }
 
+#[test]
+fn device_buffer_can_be_refilled_from_pinned_host_async() {
+    let ctx = CudaContext::new(0).expect("failed to create CUDA context");
+    let stream = ctx.new_stream().expect("failed to create CUDA stream");
+
+    let mut device =
+        DeviceBuffer::<u32>::zeroed(&stream, 4).expect("failed to allocate device buffer");
+    let mut output =
+        PinnedHostBuffer::<u32>::zeroed(&ctx, 4).expect("failed to allocate pinned output buffer");
+
+    for round in 0..3 {
+        let payload = [round * 10, round * 10 + 1, round * 10 + 2, round * 10 + 3];
+        let input =
+            PinnedHostBuffer::from_slice(&ctx, &payload).expect("failed to allocate pinned input");
+
+        // SAFETY: `input` lives until the end of this scope and the
+        // `stream.synchronize()` below completes the in-flight refill before
+        // `input` is dropped. `output` outlives the synchronize call too.
+        unsafe { device.copy_from_pinned_host_async(&stream, &input) }
+            .expect("failed to enqueue refill");
+        unsafe { device.copy_to_pinned_host_async(&stream, &mut output) }
+            .expect("failed to enqueue readback");
+        stream.synchronize().expect("failed to synchronize stream");
+
+        assert_eq!(output.as_slice(), &payload);
+    }
+}

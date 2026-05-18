@@ -237,7 +237,9 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
     /// share the same [`CudaContext`].
     ///
     /// The device-to-host counterparts are [`Self::copy_to_pinned_host`]
-    /// (blocking) and [`Self::copy_to_pinned_host_async`] (non-blocking).
+    /// (blocking) and [`Self::copy_to_pinned_host_async`] (non-blocking). To
+    /// refill an existing device buffer instead of allocating a new one, use
+    /// [`Self::copy_from_pinned_host_async`].
     ///
     /// # Safety
     ///
@@ -388,4 +390,51 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
         }
     }
 
+    /// Enqueues a host-to-device copy from a pinned host buffer into this
+    /// device buffer and returns without synchronizing.
+    ///
+    /// This is the symmetric counterpart of
+    /// [`Self::copy_to_pinned_host_async`]: it refills an existing device
+    /// allocation from rotating pinned host stagers instead of allocating a
+    /// fresh device buffer per refresh, which is the typical shape for
+    /// asynchronous overlap pipelines.
+    ///
+    /// Panics if `src.len() > self.len()`.
+    ///
+    /// `PinnedHostBuffer` currently uses `cuMemAllocHost` without the
+    /// `PORTABLE` flag, so the allocation is only pinned in the context that
+    /// created it. In debug builds this asserts that `src` and `stream`
+    /// share the same [`CudaContext`].
+    ///
+    /// # Safety
+    ///
+    /// This call only enqueues the host-to-device copy on `stream` and
+    /// returns; CUDA may still be reading from `src`'s pinned pointer long
+    /// after this function returns. The caller is responsible for ensuring
+    /// `src` is not dropped, freed, mutated, or aliased until the enqueued
+    /// copy has completed, typically after the next
+    /// [`CudaStream::synchronize`] call or a stream-ordered event wait.
+    /// Dropping `src` before that synchronization point calls
+    /// `cuMemFreeHost` while the in-flight transfer is still reading the
+    /// buffer, which is undefined behavior.
+    pub unsafe fn copy_from_pinned_host_async(
+        &mut self,
+        stream: &CudaStream,
+        src: &PinnedHostBuffer<T>,
+    ) -> Result<(), DriverError> {
+        debug_assert!(
+            Arc::ptr_eq(src.context(), stream.context()),
+            "pinned host buffer and stream must belong to the same CUDA context"
+        );
+        assert!(
+            src.len() <= self.len,
+            "source pinned host buffer too large: {} > {}",
+            src.len(),
+            self.len
+        );
+        let num_bytes = src.num_bytes();
+        unsafe {
+            crate::memory::memcpy_htod_async(self.ptr, src.as_ptr(), num_bytes, stream.cu_stream())
+        }
+    }
 }
