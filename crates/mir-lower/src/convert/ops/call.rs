@@ -367,7 +367,14 @@ pub fn convert(
     };
 
     let result_type = if let Some(mir_ty) = mir_result_ty_ptr {
-        let is_unit = mir_ty.deref(ctx).is::<MirTupleType>();
+        // Only the empty tuple `()` is the unit type. `is::<MirTupleType>()`
+        // also matches `(T, U, ...)`, so we have to peek at the field count.
+        // Non-empty tuples take the convert_type path and end up as an LLVM
+        // struct return, same as named structs.
+        let is_unit = mir_ty
+            .deref(ctx)
+            .downcast_ref::<MirTupleType>()
+            .is_some_and(|t| t.get_types().is_empty());
         if is_unit {
             llvm_types::VoidType::get(ctx).into()
         } else {
@@ -410,6 +417,21 @@ pub fn convert(
     if has_result && !is_void && llvm_call.get_operation().deref(ctx).get_num_results() > 0 {
         rewriter.replace_operation(ctx, op, llvm_call.get_operation());
     } else {
+        // The LLVM call has no usable result so the MIR op must be erased.
+        // That is only safe if the MIR op itself has no live uses. If it
+        // does, the result-type computation above silently dropped a real
+        // result (e.g. a non-unit return misclassified as `()`); surface
+        // that as a cuda-oxide diagnostic rather than letting pliron's
+        // erase-with-uses invariant panic and escape into rustc as an ICE.
+        if op.deref(ctx).has_use() {
+            let loc = op.deref(ctx).loc();
+            return pliron::input_err!(
+                loc,
+                "mir.call lowering produced a void LLVM call but the MIR op \
+                 still has live uses; the return type was likely misclassified \
+                 (for example, a non-unit tuple treated as `()`)"
+            );
+        }
         rewriter.erase_operation(ctx, op);
     }
 
