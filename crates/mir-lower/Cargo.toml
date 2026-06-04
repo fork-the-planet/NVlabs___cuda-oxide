@@ -9,7 +9,7 @@ description = "dialect-mir to dialect-llvm lowering pass"
 
 [dependencies]
 pliron = { workspace = true }
-dialect-llvm = { workspace = true }
+llvm-export = { workspace = true }
 pliron-derive = { workspace = true }
 thiserror = { workspace = true }
 dialect-mir = { workspace = true }

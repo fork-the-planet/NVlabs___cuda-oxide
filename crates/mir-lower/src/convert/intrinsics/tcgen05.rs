@@ -28,9 +28,9 @@
 //! | Load            | `Ld16x256bX4`, `Ld16x256bX8`, `Ld16x256bX16`, `Ld16x256bX32`... |
 
 use crate::convert::intrinsics::common::*;
-use dialect_llvm::ops as llvm;
-use dialect_llvm::ops::InlineAsmOpExt;
-use dialect_llvm::types as llvm_types;
+use llvm_export::ops as llvm;
+use llvm_export::ops::InlineAsmOpExt;
+use llvm_export::types as llvm_types;
 use pliron::builtin::types::{FP32Type, IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::irbuild::dialect_conversion::{DialectConversionRewriter, OperandsInfo};

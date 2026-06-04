@@ -23,7 +23,7 @@
 //! With `DialectConversion` + `inline_region`, blocks are the ORIGINALS (moved,
 //! not copied). Successor pointers are already valid — no block map lookup needed.
 
-use dialect_llvm::ops as llvm;
+use llvm_export::ops as llvm;
 use pliron::basic_block::BasicBlock;
 use pliron::context::{Context, Ptr};
 use pliron::irbuild::dialect_conversion::{DialectConversionRewriter, OperandsInfo};
@@ -55,10 +55,10 @@ pub(crate) fn convert_return(
 
             let is_empty_struct = ty
                 .deref(ctx)
-                .downcast_ref::<dialect_llvm::types::StructType>()
+                .downcast_ref::<llvm_export::types::StructType>()
                 .is_some_and(|st| st.num_fields() == 0);
 
-            if ty.deref(ctx).is::<dialect_llvm::types::VoidType>() || is_empty_struct {
+            if ty.deref(ctx).is::<llvm_export::types::VoidType>() || is_empty_struct {
                 None
             } else {
                 Some(*val)
@@ -220,7 +220,7 @@ pub(crate) fn convert_goto(
 
             let is_empty_struct = arg_ty
                 .deref(ctx)
-                .downcast_ref::<dialect_llvm::types::StructType>()
+                .downcast_ref::<llvm_export::types::StructType>()
                 .is_some_and(|st| st.num_fields() == 0);
 
             if is_empty_struct {

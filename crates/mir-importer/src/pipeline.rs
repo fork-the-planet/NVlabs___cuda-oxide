@@ -96,13 +96,13 @@ pub struct DeviceExternAttrs {
 }
 
 // Implement AsDeviceExtern trait for dialect-llvm integration
-impl dialect_llvm::export::AsDeviceExtern for DeviceExternDecl {
-    fn as_device_extern(&self) -> dialect_llvm::export::DeviceExternDecl {
-        dialect_llvm::export::DeviceExternDecl {
+impl llvm_export::export::AsDeviceExtern for DeviceExternDecl {
+    fn as_device_extern(&self) -> llvm_export::export::DeviceExternDecl {
+        llvm_export::export::DeviceExternDecl {
             export_name: self.export_name.clone(),
             param_types: self.param_types.clone(),
             return_type: self.return_type.clone(),
-            attrs: dialect_llvm::export::DeviceExternAttrs {
+            attrs: llvm_export::export::DeviceExternAttrs {
                 is_convergent: self.attrs.is_convergent,
                 is_pure: self.attrs.is_pure,
                 is_readonly: self.attrs.is_readonly,
@@ -457,13 +457,13 @@ fn module_uses_libdevice(ctx: &Context, module_op_ptr: Ptr<Operation>) -> bool {
 
 /// Recursively scan for declared or called CUDA libdevice functions.
 fn op_uses_libdevice(ctx: &Context, op_ptr: Ptr<Operation>) -> bool {
-    if let Some(func) = Operation::get_op::<dialect_llvm::ops::FuncOp>(op_ptr, ctx)
+    if let Some(func) = Operation::get_op::<llvm_export::ops::FuncOp>(op_ptr, ctx)
         && func.get_symbol_name(ctx).starts_with("__nv_")
     {
         return true;
     }
 
-    if let Some(call) = Operation::get_op::<dialect_llvm::ops::CallOp>(op_ptr, ctx)
+    if let Some(call) = Operation::get_op::<llvm_export::ops::CallOp>(op_ptr, ctx)
         && let CallOpCallable::Direct(callee) = call.callee(ctx)
         && callee.to_string().starts_with("__nv_")
     {
@@ -546,8 +546,8 @@ fn add_device_extern_declarations(
     module_op_ptr: Ptr<Operation>,
     device_externs: &[DeviceExternDecl],
 ) -> Result<(), PipelineError> {
-    use dialect_llvm::ops::FuncOp;
-    use dialect_llvm::types::{FuncType, VoidType};
+    use llvm_export::ops::FuncOp;
+    use llvm_export::types::{FuncType, VoidType};
     use pliron::identifier::Identifier;
 
     // Get the module's block pointer first (this is a Ptr, not a Ref, so no borrow issues)
@@ -597,13 +597,13 @@ fn add_device_extern_declarations(
 
 /// Convert LLVM type string to pliron type.
 fn llvm_type_string_to_pliron(ctx: &mut Context, type_str: &str) -> Ptr<pliron::r#type::TypeObj> {
-    use dialect_llvm::types::PointerType;
+    use llvm_export::types::PointerType;
     use pliron::builtin::types::{FP32Type, FP64Type, IntegerType, Signedness};
 
     match type_str {
         "float" => FP32Type::get(ctx).into(),
         "double" => FP64Type::get(ctx).into(),
-        "half" => dialect_llvm::types::HalfType::get(ctx).into(),
+        "half" => llvm_export::types::HalfType::get(ctx).into(),
         "i1" => IntegerType::get(ctx, 1, Signedness::Signless).into(),
         "i8" => IntegerType::get(ctx, 8, Signedness::Signless).into(),
         "i16" => IntegerType::get(ctx, 16, Signedness::Signless).into(),
@@ -632,12 +632,12 @@ fn export_llvm_ir(
         .ok_or_else(|| PipelineError::Export("Not a module op".to_string()))?;
 
     let llvm_ir = if emit_nvvm_ir {
-        let config = dialect_llvm::export::NvvmExportConfig;
-        dialect_llvm::export::export_module_with_externs(ctx, &module_op, device_externs, &config)
+        let config = llvm_export::export::NvvmExportConfig;
+        llvm_export::export::export_module_with_externs(ctx, &module_op, device_externs, &config)
             .map_err(PipelineError::Export)?
     } else {
-        let config = dialect_llvm::export::PtxExportConfig;
-        dialect_llvm::export::export_module_with_externs(ctx, &module_op, device_externs, &config)
+        let config = llvm_export::export::PtxExportConfig;
+        llvm_export::export::export_module_with_externs(ctx, &module_op, device_externs, &config)
             .map_err(PipelineError::Export)?
     };
 
@@ -1021,7 +1021,7 @@ impl std::error::Error for PipelineError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialect_llvm::export::AsDeviceExtern;
+    use llvm_export::export::AsDeviceExtern;
     use std::{fs, path::PathBuf};
 
     fn write_temp_ll(name: &str, contents: &str) -> PathBuf {
@@ -1121,8 +1121,8 @@ mod tests {
     /// the auto-detect logic only inspects the symbol name on declarations
     /// and on direct call sites.
     fn build_module_with_func_decl(ctx: &mut Context, name: &str) -> Ptr<Operation> {
-        use dialect_llvm::ops::FuncOp as LlvmFuncOp;
-        use dialect_llvm::types::FuncType as LlvmFuncType;
+        use llvm_export::ops::FuncOp as LlvmFuncOp;
+        use llvm_export::types::FuncType as LlvmFuncType;
         use pliron::basic_block::BasicBlock;
         use pliron::builtin::ops::ModuleOp;
         use pliron::builtin::types::{IntegerType, Signedness};
@@ -1190,8 +1190,8 @@ mod tests {
     /// `CallOp` even when no enclosing `FuncOp` matches the prefix rule.
     #[test]
     fn test_module_uses_libdevice_detects_direct_nv_call() {
-        use dialect_llvm::ops::CallOp as LlvmCallOp;
-        use dialect_llvm::types::FuncType as LlvmFuncType;
+        use llvm_export::ops::CallOp as LlvmCallOp;
+        use llvm_export::types::FuncType as LlvmFuncType;
         use pliron::basic_block::BasicBlock;
         use pliron::builtin::ops::ModuleOp;
         use pliron::builtin::types::{IntegerType, Signedness};

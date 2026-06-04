@@ -371,24 +371,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialect-llvm"
-version = "0.1.0"
-dependencies = [
- "bitflags",
- "combine",
- "dyn-clone",
- "expect-test",
- "linkme",
- "log",
- "pliron",
- "pliron-derive",
- "pliron-llvm",
- "reserved-oxide-symbols",
- "rustc-hash",
- "thiserror",
-]
-
-[[package]]
 name = "dialect-mir"
 version = "0.1.0"
 dependencies = [
@@ -682,6 +664,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "llvm-export"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "combine",
+ "dyn-clone",
+ "expect-test",
+ "linkme",
+ "log",
+ "pliron",
+ "pliron-derive",
+ "pliron-llvm",
+ "reserved-oxide-symbols",
+ "rustc-hash",
+ "thiserror",
+]
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -704,10 +704,10 @@ name = "mir-importer"
 version = "0.1.0"
 dependencies = [
  "combine",
- "dialect-llvm",
  "dialect-mir",
  "dialect-nvvm",
  "linkme",
+ "llvm-export",
  "mir-lower",
  "once_cell",
  "pliron",
@@ -720,9 +720,9 @@ name = "mir-lower"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dialect-llvm",
  "dialect-mir",
  "dialect-nvvm",
+ "llvm-export",
  "pliron",
  "pliron-derive",
  "reserved-oxide-symbols",

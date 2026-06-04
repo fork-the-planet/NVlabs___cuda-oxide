@@ -19,7 +19,7 @@ use pliron::{
     result::Result,
 };
 
-use dialect_llvm::attributes::{FCmpPredicateAttr, ICmpPredicateAttr};
+use llvm_export::attributes::{FCmpPredicateAttr, ICmpPredicateAttr};
 
 use crate::conversion_interface::MirToLlvmConversion;
 

@@ -10,7 +10,7 @@
 //!
 //! This crate implements the lowering pass that converts
 //! [`dialect-mir`][dialect_mir] operations into
-//! [`dialect-llvm`][dialect_llvm] operations, with GPU-specific operations
+//! [`dialect-llvm`][llvm_export] operations, with GPU-specific operations
 //! lowered to inline PTX assembly or NVVM intrinsic calls.
 //!
 //! ## Overview

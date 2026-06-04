@@ -19,7 +19,7 @@ crate-type = ["dylib"]
 # Use path dependencies since we're isolated from workspace
 mir-importer = { path = "../mir-importer" }
 mir-lower = { path = "../mir-lower" }
-dialect-llvm = { path = "../dialect-llvm" }
+llvm-export = { path = "../llvm-export" }
 dialect-mir = { path = "../dialect-mir" }
 dialect-nvvm = { path = "../dialect-nvvm" }
 reserved-oxide-symbols = { path = "../reserved-oxide-symbols" }

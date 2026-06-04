@@ -7,7 +7,7 @@
 //!
 //! The dialect *modeling* (types, ops, attributes, op-interfaces) now lives
 //! upstream in [`pliron_llvm`]; this crate is a thin shim that re-exports it so
-//! existing `dialect_llvm::{ops,types,attributes,op_interfaces}` paths keep
+//! existing `llvm_export::{ops,types,attributes,op_interfaces}` paths keep
 //! resolving, plus the small set of GPU-specific extensions pliron-llvm does
 //! not carry (named address spaces, syncscope enum, fp16 bit helpers). The
 //! pure-Rust textual `.ll` exporter ([`export`]) stays here: pliron-llvm only

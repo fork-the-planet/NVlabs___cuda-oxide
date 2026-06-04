@@ -51,7 +51,7 @@
 //! }
 //! ```
 
-use dialect_llvm::ops as llvm;
+use llvm_export::ops as llvm;
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::op_interfaces::SymbolOpInterface;
 use pliron::builtin::types::{IntegerType, Signedness};
@@ -297,7 +297,7 @@ pub fn ensure_intrinsic_declared(
     ctx: &mut Context,
     llvm_block: Ptr<BasicBlock>,
     intrinsic_name: &str,
-    func_ty: pliron::r#type::TypePtr<dialect_llvm::types::FuncType>,
+    func_ty: pliron::r#type::TypePtr<llvm_export::types::FuncType>,
 ) -> Result<(), anyhow::Error> {
     // Navigate from block to parent function
     let func_op = llvm_block

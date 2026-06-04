@@ -65,10 +65,10 @@ use crate::convert::types::{
     convert_function_type, convert_type, is_kernel_func, is_zero_sized_type,
 };
 use crate::helpers;
-use dialect_llvm::op_interfaces::CastOpInterface;
-use dialect_llvm::ops as llvm;
-use dialect_llvm::types as llvm_types;
-use dialect_llvm::types::PointerTypeExt;
+use llvm_export::op_interfaces::CastOpInterface;
+use llvm_export::ops as llvm;
+use llvm_export::types as llvm_types;
+use llvm_export::types::PointerTypeExt;
 use dialect_mir::ops::{MirCallOp, MirFuncOp};
 use dialect_mir::rust_intrinsics;
 use dialect_mir::types::{MirDisjointSliceType, MirSliceType, MirStructType, MirTupleType};

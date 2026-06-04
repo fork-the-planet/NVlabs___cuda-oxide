@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use dialect_llvm::{
+use llvm_export::{
     op_interfaces::CastOpInterface,
     ops::{AddressOfOp, BitcastOp, BrOp, CondBrOp, ReturnOp, UndefOp},
 };
@@ -94,9 +94,9 @@ fn test_llvm_arithmetic_verify() {
         let op = Operation::new(&mut context, opid, vec![ty.into()], vec![l, r], vec![], 0);
 
         if needs_flags {
-            let flags = dialect_llvm::attributes::IntegerOverflowFlagsAttr::default();
+            let flags = llvm_export::attributes::IntegerOverflowFlagsAttr::default();
             op.deref_mut(&context).attributes.set(
-                dialect_llvm::op_interfaces::ATTR_KEY_INTEGER_OVERFLOW_FLAGS.clone(),
+                llvm_export::op_interfaces::ATTR_KEY_INTEGER_OVERFLOW_FLAGS.clone(),
                 flags,
             );
         }
@@ -111,9 +111,9 @@ fn test_llvm_arithmetic_verify() {
         let op_bad = Operation::new(&mut context, opid, vec![ty.into()], vec![l, l64], vec![], 0);
 
         if needs_flags {
-            let flags = dialect_llvm::attributes::IntegerOverflowFlagsAttr::default();
+            let flags = llvm_export::attributes::IntegerOverflowFlagsAttr::default();
             op_bad.deref_mut(&context).attributes.set(
-                dialect_llvm::op_interfaces::ATTR_KEY_INTEGER_OVERFLOW_FLAGS.clone(),
+                llvm_export::op_interfaces::ATTR_KEY_INTEGER_OVERFLOW_FLAGS.clone(),
                 flags,
             );
         }
@@ -122,57 +122,57 @@ fn test_llvm_arithmetic_verify() {
     };
 
     check_int_bin_op(
-        dialect_llvm::ops::AddOp::get_concrete_op_info(),
+        llvm_export::ops::AddOp::get_concrete_op_info(),
         "AddOp",
         true,
     );
     check_int_bin_op(
-        dialect_llvm::ops::SubOp::get_concrete_op_info(),
+        llvm_export::ops::SubOp::get_concrete_op_info(),
         "SubOp",
         true,
     );
     check_int_bin_op(
-        dialect_llvm::ops::MulOp::get_concrete_op_info(),
+        llvm_export::ops::MulOp::get_concrete_op_info(),
         "MulOp",
         true,
     );
     check_int_bin_op(
-        dialect_llvm::ops::ShlOp::get_concrete_op_info(),
+        llvm_export::ops::ShlOp::get_concrete_op_info(),
         "ShlOp",
         true,
     );
     check_int_bin_op(
-        dialect_llvm::ops::UDivOp::get_concrete_op_info(),
+        llvm_export::ops::UDivOp::get_concrete_op_info(),
         "UDivOp",
         false,
     );
     check_int_bin_op(
-        dialect_llvm::ops::SDivOp::get_concrete_op_info(),
+        llvm_export::ops::SDivOp::get_concrete_op_info(),
         "SDivOp",
         false,
     );
     check_int_bin_op(
-        dialect_llvm::ops::URemOp::get_concrete_op_info(),
+        llvm_export::ops::URemOp::get_concrete_op_info(),
         "URemOp",
         false,
     );
     check_int_bin_op(
-        dialect_llvm::ops::SRemOp::get_concrete_op_info(),
+        llvm_export::ops::SRemOp::get_concrete_op_info(),
         "SRemOp",
         false,
     );
     check_int_bin_op(
-        dialect_llvm::ops::AndOp::get_concrete_op_info(),
+        llvm_export::ops::AndOp::get_concrete_op_info(),
         "AndOp",
         false,
     );
     check_int_bin_op(
-        dialect_llvm::ops::OrOp::get_concrete_op_info(),
+        llvm_export::ops::OrOp::get_concrete_op_info(),
         "OrOp",
         false,
     );
     check_int_bin_op(
-        dialect_llvm::ops::XorOp::get_concrete_op_info(),
+        llvm_export::ops::XorOp::get_concrete_op_info(),
         "XorOp",
         false,
     );
@@ -184,7 +184,7 @@ fn test_llvm_misc_verify() {
 
     let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
     let i64_ty = IntegerType::get(&mut ctx, 64, Signedness::Signless);
-    let ptr_ty = dialect_llvm::types::PointerType::get(&mut ctx, 0);
+    let ptr_ty = llvm_export::types::PointerType::get(&mut ctx, 0);
 
     // 1. BitcastOp
     let block = BasicBlock::new(&mut ctx, None, vec![i32_ty.into()]);

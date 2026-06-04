@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use dialect_llvm::{
+use llvm_export::{
     export::export_module_to_string,
     ops::{AddressOfOp, BrOp, FuncOp, GepIndex, GetElementPtrOp, GlobalOp, ReturnOp},
     types::{FuncType, VoidType},

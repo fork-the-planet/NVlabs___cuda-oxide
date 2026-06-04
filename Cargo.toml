@@ -5,7 +5,7 @@ members = [
     "crates/cuda-device",
     "crates/cuda-host",
     "crates/cuda-macros",
-    "crates/dialect-llvm",
+    "crates/llvm-export",
     "crates/dialect-mir",
     "crates/dialect-nvvm",
     "crates/mir-importer",
@@ -50,7 +50,7 @@ pliron-derive = { git = "https://github.com/nihalpasham/pliron", rev = "c239bd64
 pliron-llvm = { git = "https://github.com/nihalpasham/pliron", rev = "c239bd64c5d870631611ab8b346f421c02312e95", default-features = false }
 
 # Internal crates
-dialect-llvm = { path = "crates/dialect-llvm" }
+llvm-export = { path = "crates/llvm-export" }
 dialect-mir = { path = "crates/dialect-mir" }
 dialect-nvvm = { path = "crates/dialect-nvvm" }
 mir-lower = { path = "crates/mir-lower" }
@@ -78,7 +78,7 @@ log = "0.4"
 half = "2.7"
 libloading = "0.8"
 
-# dialect-llvm deps
+# llvm-export deps
 rustc-hash = "2.0"
 bitflags = "2.0"
 dyn-clone = "1.0"

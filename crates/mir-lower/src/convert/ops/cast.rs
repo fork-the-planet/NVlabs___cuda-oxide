@@ -54,9 +54,9 @@
 
 use crate::convert::types::convert_type;
 use crate::helpers;
-use dialect_llvm::op_interfaces::CastOpInterface;
-use dialect_llvm::ops as llvm;
-use dialect_llvm::types::FuncType;
+use llvm_export::op_interfaces::CastOpInterface;
+use llvm_export::ops as llvm;
+use llvm_export::types::FuncType;
 use dialect_mir::attributes::MirCastKindAttr;
 use dialect_mir::ops::MirCastOp;
 use dialect_mir::types::{MirArrayType, MirPtrType};
@@ -348,7 +348,7 @@ fn emit_unsize_cast(
     };
 
     if let Some(len) = array_len {
-        let dst_is_struct = llvm_ty.deref(ctx).is::<dialect_llvm::types::StructType>();
+        let dst_is_struct = llvm_ty.deref(ctx).is::<llvm_export::types::StructType>();
 
         if dst_is_struct {
             let undef = llvm::UndefOp::new(ctx, llvm_ty);
@@ -392,15 +392,15 @@ fn emit_pointer_cast(
     val_ty: Ptr<pliron::r#type::TypeObj>,
     llvm_ty: Ptr<pliron::r#type::TypeObj>,
 ) -> Result<Ptr<Operation>> {
-    let src_is_struct = val_ty.deref(ctx).is::<dialect_llvm::types::StructType>();
-    let dst_is_struct = llvm_ty.deref(ctx).is::<dialect_llvm::types::StructType>();
+    let src_is_struct = val_ty.deref(ctx).is::<llvm_export::types::StructType>();
+    let dst_is_struct = llvm_ty.deref(ctx).is::<llvm_export::types::StructType>();
     let src_as = val_ty
         .deref(ctx)
-        .downcast_ref::<dialect_llvm::types::PointerType>()
+        .downcast_ref::<llvm_export::types::PointerType>()
         .map(|pt| pt.address_space());
     let dst_as = llvm_ty
         .deref(ctx)
-        .downcast_ref::<dialect_llvm::types::PointerType>()
+        .downcast_ref::<llvm_export::types::PointerType>()
         .map(|pt| pt.address_space());
     let dst_is_ptr = dst_as.is_some();
     let src_is_ptr = src_as.is_some();
@@ -458,7 +458,7 @@ fn emit_pointer_cast(
         Ok(llvm::LoadOp::new(ctx, ptr, llvm_ty).get_operation())
     } else if let (Some(s), Some(d)) = (src_as, dst_as) {
         if s != d {
-            let cast_ty = dialect_llvm::types::PointerType::get(ctx, d).into();
+            let cast_ty = llvm_export::types::PointerType::get(ctx, d).into();
             Ok(llvm::AddrSpaceCastOp::new(ctx, val, cast_ty).get_operation())
         } else {
             Ok(llvm::BitcastOp::new(ctx, val, llvm_ty).get_operation())
@@ -549,7 +549,7 @@ fn deep_scalar_index_path(
         }
         let next = {
             let r = current.deref(ctx);
-            let s = r.downcast_ref::<dialect_llvm::types::StructType>()?;
+            let s = r.downcast_ref::<llvm_export::types::StructType>()?;
             if s.num_fields() != 1 {
                 return None;
             }
@@ -590,7 +590,7 @@ fn emit_scalar_to_niched_enum(
     let (disc_ty, payload_ty) = {
         let r = llvm_ty.deref(ctx);
         let s = r
-            .downcast_ref::<dialect_llvm::types::StructType>()
+            .downcast_ref::<llvm_export::types::StructType>()
             .ok_or_else(|| {
                 pliron::input_error_noloc!("emit_scalar_to_niched_enum: dst is not a struct")
             })?;
@@ -607,7 +607,7 @@ fn emit_scalar_to_niched_enum(
     // sources that's just the niche bit pattern; for pointer sources we
     // construct it as `inttoptr i64 <niche_start>` (which folds to `null`
     // when niche_start is 0, the case rustc actually emits).
-    let src_is_ptr = val_ty.deref(ctx).is::<dialect_llvm::types::PointerType>();
+    let src_is_ptr = val_ty.deref(ctx).is::<llvm_export::types::PointerType>();
     let cmp_const = if src_is_ptr {
         let i64_ty: Ptr<pliron::r#type::TypeObj> =
             IntegerType::get(ctx, 64, Signedness::Signless).into();
@@ -621,7 +621,7 @@ fn emit_scalar_to_niched_enum(
 
     let icmp = llvm::ICmpOp::new(
         ctx,
-        dialect_llvm::attributes::ICmpPredicateAttr::EQ,
+        llvm_export::attributes::ICmpPredicateAttr::EQ,
         val,
         cmp_const,
     );
@@ -713,14 +713,14 @@ fn single_scalar_struct_width(ctx: &Context, ty: Ptr<pliron::r#type::TypeObj>) -
         if let Some(i) = r.downcast_ref::<IntegerType>() {
             return Some(i.width());
         }
-        if let Some(p) = r.downcast_ref::<dialect_llvm::types::PointerType>() {
+        if let Some(p) = r.downcast_ref::<llvm_export::types::PointerType>() {
             // Pointers are addressed as opaque integer-width bit patterns
             // for the purpose of memory-round-trip sizing. CUDA targets
             // 64-bit pointers across address spaces.
             let _ = p;
             return Some(64);
         }
-        let s = r.downcast_ref::<dialect_llvm::types::StructType>()?;
+        let s = r.downcast_ref::<llvm_export::types::StructType>()?;
         if s.num_fields() != 1 {
             return None;
         }
@@ -741,7 +741,7 @@ fn convert_float_to_float(
     let dst_width = float_bit_width(ctx, llvm_ty)?;
 
     let flags_key: pliron::identifier::Identifier = "llvm_fast_math_flags".try_into().unwrap();
-    let flags = dialect_llvm::attributes::FastmathFlagsAttr::default();
+    let flags = llvm_export::attributes::FastmathFlagsAttr::default();
 
     if src_width < dst_width {
         let op = llvm::FPExtOp::new(ctx, val, llvm_ty);

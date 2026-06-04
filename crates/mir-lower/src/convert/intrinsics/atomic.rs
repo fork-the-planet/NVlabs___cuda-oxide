@@ -47,8 +47,8 @@
 
 use crate::convert::types::convert_type;
 
-use dialect_llvm::attributes::{LlvmAtomicOrdering, LlvmAtomicRmwKind, LlvmSyncScope};
-use dialect_llvm::ops as llvm;
+use llvm_export::attributes::{LlvmAtomicOrdering, LlvmAtomicRmwKind, LlvmSyncScope};
+use llvm_export::ops as llvm;
 use dialect_nvvm::ops::atomic::{
     AtomicOrdering as NvvmOrdering, AtomicRmwKind as NvvmRmwKind, AtomicScope as NvvmScope,
     NvvmAtomicCmpxchgOp, NvvmAtomicLoadOp, NvvmAtomicOpInterface, NvvmAtomicRmwOp,

@@ -454,7 +454,7 @@ pub fn translate_type(
                     64,
                     pliron::builtin::types::Signedness::Unsigned,
                 );
-                Ok(dialect_llvm::types::ArrayType::get(ctx, i64_ty.into(), 16).into())
+                Ok(llvm_export::types::ArrayType::get(ctx, i64_ty.into(), 16).into())
             } else {
                 // Generic ADT handling for user-defined structs and enums
                 let variants = adt_def.variants();

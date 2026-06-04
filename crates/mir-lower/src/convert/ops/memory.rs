@@ -50,9 +50,9 @@
 use crate::context::{DeviceGlobalsMap, DynamicSmemAlignmentMap, SharedGlobalsMap};
 use crate::convert::types::convert_type;
 use crate::helpers;
-use dialect_llvm::ops as llvm;
-use dialect_llvm::ops::GlobalOpExt;
-use dialect_llvm::types::ArrayType;
+use llvm_export::ops as llvm;
+use llvm_export::ops::GlobalOpExt;
+use llvm_export::types::ArrayType;
 use dialect_mir::types::MirPtrType;
 use pliron::builtin::op_interfaces::SymbolOpInterface;
 use pliron::builtin::types::{IntegerType, Signedness};
@@ -229,7 +229,7 @@ pub(crate) fn convert_ptr_offset(
     let llvm_gep = llvm::GetElementPtrOp::new(
         ctx,
         ptr,
-        vec![dialect_llvm::ops::GepIndex::Value(offset)],
+        vec![llvm_export::ops::GepIndex::Value(offset)],
         elem_ty,
     );
     rewriter.insert_operation(ctx, llvm_gep.get_operation());
@@ -355,7 +355,7 @@ fn create_shared_global(
     } else {
         llvm::GlobalOp::new(ctx, name.clone(), array_type.into())
     };
-    global_op.set_address_space(ctx, dialect_llvm::types::address_space::SHARED);
+    global_op.set_address_space(ctx, llvm_export::types::address_space::SHARED);
 
     let parent_block = op
         .deref(ctx)
@@ -435,9 +435,9 @@ pub fn convert_global_alloc_dc(
             .downcast_ref::<dialect_mir::types::MirPtrType>()
             .map(|p| {
                 if p.address_space == dialect_mir::types::address_space::CONSTANT {
-                    dialect_llvm::types::address_space::CONSTANT
+                    llvm_export::types::address_space::CONSTANT
                 } else {
-                    dialect_llvm::types::address_space::GLOBAL
+                    llvm_export::types::address_space::GLOBAL
                 }
             })
             .ok_or_else(|| {
@@ -485,7 +485,7 @@ fn create_device_global(
     // resolve them by name via `cuModuleGetGlobal`. Ordinary device globals
     // are private to the kernel and get a counter-based unique name.
     let name: pliron::identifier::Identifier =
-        if addr_space == dialect_llvm::types::address_space::CONSTANT {
+        if addr_space == llvm_export::types::address_space::CONSTANT {
             global_key.try_into().map_err(|e| {
                 anyhow_to_pliron(anyhow::anyhow!(
                     "constant global_key {global_key:?} is not a valid identifier: {e:?}"
@@ -604,7 +604,7 @@ pub fn convert_extern_shared_dc(
         let gep_op = llvm::GetElementPtrOp::new(
             ctx,
             base_ptr,
-            vec![dialect_llvm::ops::GepIndex::Value(offset_value)],
+            vec![llvm_export::ops::GepIndex::Value(offset_value)],
             i8_ty.into(),
         );
         rewriter.insert_operation(ctx, gep_op.get_operation());
@@ -659,10 +659,10 @@ fn get_or_create_extern_shared_global(
         array_type.into(),
         max_alignment,
     );
-    global_op.set_address_space(ctx, dialect_llvm::types::address_space::SHARED);
+    global_op.set_address_space(ctx, llvm_export::types::address_space::SHARED);
 
     {
-        use dialect_llvm::attributes::LinkageAttr;
+        use llvm_export::attributes::LinkageAttr;
         global_op.set_attr_llvm_global_linkage(ctx, LinkageAttr::ExternalLinkage);
     }
 

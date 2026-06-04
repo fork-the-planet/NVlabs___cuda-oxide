@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use dialect_llvm::ops as llvm;
+use llvm_export::ops as llvm;
 use dialect_mir::ops as mir;
 use dialect_nvvm::ops as nvvm;
 use pliron::builtin::op_interfaces::{CallOpCallable, CallOpInterface, SymbolOpInterface};
@@ -98,7 +98,7 @@ fn test_intrinsic_insertion() -> Result<(), anyhow::Error> {
     let block = region.deref(&ctx).iter(&ctx).next().unwrap();
 
     for op in block.deref(&ctx).iter(&ctx) {
-        if let Some(func_op) = Operation::get_op::<dialect_llvm::ops::FuncOp>(op, &ctx) {
+        if let Some(func_op) = Operation::get_op::<llvm_export::ops::FuncOp>(op, &ctx) {
             let name = func_op.get_symbol_name(&ctx).to_string();
             if name == "llvm_nvvm_read_ptx_sreg_tid_x" {
                 found_intrinsic = true;
@@ -213,7 +213,7 @@ fn test_globaltimer_lowers_to_intrinsic_call() -> Result<(), anyhow::Error> {
     let block = region.deref(&ctx).iter(&ctx).next().unwrap();
 
     for op in block.deref(&ctx).iter(&ctx) {
-        let Some(func_op) = Operation::get_op::<dialect_llvm::ops::FuncOp>(op, &ctx) else {
+        let Some(func_op) = Operation::get_op::<llvm_export::ops::FuncOp>(op, &ctx) else {
             continue;
         };
         let name = func_op.get_symbol_name(&ctx).to_string();
@@ -332,7 +332,7 @@ fn test_threadfence_system_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
     let block = region.deref(&ctx).iter(&ctx).next().unwrap();
 
     for op in block.deref(&ctx).iter(&ctx) {
-        if let Some(func_op) = Operation::get_op::<dialect_llvm::ops::FuncOp>(op, &ctx) {
+        if let Some(func_op) = Operation::get_op::<llvm_export::ops::FuncOp>(op, &ctx) {
             let name = func_op.get_symbol_name(&ctx).to_string();
             if name != func_name {
                 continue;
@@ -381,7 +381,7 @@ fn test_threadfence_system_lowers_to_inline_asm() -> Result<(), anyhow::Error> {
 /// and asserts the lowered `caller` body contains an `AddrSpaceCastOp`.
 #[test]
 fn addrspace_coercion_inserts_addrspacecast_at_call_site() -> Result<(), anyhow::Error> {
-    use dialect_llvm::ops::AddrSpaceCastOp;
+    use llvm_export::ops::AddrSpaceCastOp;
     use dialect_mir::types::MirPtrType;
     use pliron::basic_block::BasicBlock;
     use pliron::builtin::attributes::{StringAttr, TypeAttr};
