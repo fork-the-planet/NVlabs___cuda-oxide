@@ -28,3 +28,7 @@ This crate is not intended for direct use. Prefer the safe wrappers in `cuda-cor
 // Low-level access (if you need it):
 use cuda_bindings::{cuInit, cuDeviceGet, CUdevice};
 ```
+
+## License
+
+- The crate is licensed under [LICENSE-NVIDIA](../../LICENSE-NVIDIA).
