@@ -1025,6 +1025,18 @@ impl<'tcx> DeviceCollector<'tcx> {
         let crate_name = self.tcx.crate_name(def_id.krate);
         let name_str = crate_name.as_str();
 
+        // The `libm` crate (glam's `nostd-libm` float backend) is intercepted at
+        // every call site by mir-importer's float-math dispatch and lowered to
+        // libdevice intrinsics (`__nv_sqrtf`, `__nv_sinf`, ...). Its bodies must
+        // therefore NOT be collected: translating libm's generic software-float
+        // implementations (e.g. `libm::math::generic::sqrt::sqrt_round`) would
+        // both be wasted work and trip importer gaps. Skip the whole crate; any
+        // libm function we don't yet intercept will surface as a missing symbol,
+        // signalling that `from_libm_path` needs another entry.
+        if name_str == "libm" {
+            return CollectDecision::SkipIntentional;
+        }
+
         // Check if this is a kernel entry point. Kernels can come from ANY
         // crate — this enables library crates to export generic kernels that
         // get monomorphized when used in an application.

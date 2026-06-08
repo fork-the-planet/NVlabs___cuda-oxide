@@ -1514,6 +1514,22 @@ fn try_dispatch_intrinsic(
         ));
     }
 
+    if let Some(is_f64) = intrinsics::float_math::libm_sincos_is_f64(name) {
+        return Ok(Some(intrinsics::float_math::emit_sincos(
+            ctx,
+            body,
+            is_f64,
+            args,
+            destination,
+            target,
+            block_ptr,
+            prev_op,
+            value_map,
+            block_map,
+            loc,
+        )?));
+    }
+
     if let Some(intrinsic) = intrinsics::float_math::RustFloatMathIntrinsic::from_core_path(name) {
         return Ok(Some(
             intrinsics::float_math::emit_rust_float_math_intrinsic(

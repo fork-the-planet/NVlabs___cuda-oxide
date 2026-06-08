@@ -182,6 +182,61 @@ impl RustFloatMathIntrinsic {
             "std::sys::cmath::atan2" => Some(Self::Atan2F64),
             "std::sys::cmath::atanf" => Some(Self::AtanF32),
             "std::sys::cmath::atan" => Some(Self::AtanF64),
+            other => Self::from_libm_path(other),
+        }
+    }
+
+    /// Recognize `libm` crate float functions (the `nostd-libm` lowering used
+    /// by glam on nvptx, e.g. `libm::math::sqrt::sqrtf`). These dependency-rlib
+    /// functions frequently lack exportable MIR downstream, so we intercept them
+    /// and lower to the same libdevice intrinsics as the core-intrinsic forms,
+    /// giving hardware math instead of software libm. Match on the final path
+    /// segment so both the canonical (`libm::math::sqrt::sqrtf`) and re-exported
+    /// (`libm::sqrtf`) spellings are caught.
+    fn from_libm_path(name: &str) -> Option<Self> {
+        if !name.contains("libm") {
+            return None;
+        }
+        let seg = name.rsplit("::").next().unwrap_or(name);
+        match seg {
+            "sqrtf" => Some(Self::SqrtF32),
+            "sqrt" => Some(Self::SqrtF64),
+            "sinf" => Some(Self::SinF32),
+            "sin" => Some(Self::SinF64),
+            "cosf" => Some(Self::CosF32),
+            "cos" => Some(Self::CosF64),
+            "tanf" => Some(Self::TanF32),
+            "tan" => Some(Self::TanF64),
+            "expf" => Some(Self::ExpF32),
+            "exp" => Some(Self::ExpF64),
+            "exp2f" => Some(Self::Exp2F32),
+            "exp2" => Some(Self::Exp2F64),
+            "logf" => Some(Self::LogF32),
+            "log" => Some(Self::LogF64),
+            "log2f" => Some(Self::Log2F32),
+            "log2" => Some(Self::Log2F64),
+            "log10f" => Some(Self::Log10F32),
+            "log10" => Some(Self::Log10F64),
+            // libm: `powf` is the f32 power, `pow` is the f64 power.
+            "powf" => Some(Self::PowfF32),
+            "pow" => Some(Self::PowfF64),
+            "floorf" => Some(Self::FloorF32),
+            "floor" => Some(Self::FloorF64),
+            "ceilf" => Some(Self::CeilF32),
+            "ceil" => Some(Self::CeilF64),
+            "truncf" => Some(Self::TruncF32),
+            "trunc" => Some(Self::TruncF64),
+            "roundf" => Some(Self::RoundF32),
+            "round" => Some(Self::RoundF64),
+            "fmaf" => Some(Self::FmaF32),
+            "fma" => Some(Self::FmaF64),
+            "fabsf" | "fabs" => Some(Self::Fabs),
+            "copysignf" => Some(Self::CopysignF32),
+            "copysign" => Some(Self::CopysignF64),
+            "atan2f" => Some(Self::Atan2F32),
+            "atan2" => Some(Self::Atan2F64),
+            "atanf" => Some(Self::AtanF32),
+            "atan" => Some(Self::AtanF64),
             _ => None,
         }
     }
@@ -237,6 +292,148 @@ impl RustFloatMathIntrinsic {
             Self::AtanF32 => rust_intrinsics::CALLEE_ATAN_F32,
             Self::AtanF64 => rust_intrinsics::CALLEE_ATAN_F64,
         }
+    }
+}
+
+/// Recognize `libm::sincosf` / `libm::sincos` (glam's `nostd-libm` lowering of
+/// `f32::sin_cos`). These return a `(sin, cos)` tuple, so they do not fit the
+/// scalar `RustFloatMathIntrinsic` dispatch; [`emit_sincos`] handles them.
+/// Returns `Some(is_f64)` when `name` is a libm sincos function.
+pub fn libm_sincos_is_f64(name: &str) -> Option<bool> {
+    if !name.contains("libm") {
+        return None;
+    }
+    match name.rsplit("::").next().unwrap_or(name) {
+        "sincosf" => Some(false),
+        "sincos" => Some(true),
+        _ => None,
+    }
+}
+
+/// Emit `libm::sincos{f}(x) -> (sin, cos)` as a `sinf`/`cosf` placeholder pair
+/// (lowered to libdevice `__nv_sin/cosf`) packed into the destination tuple.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_sincos(
+    ctx: &mut Context,
+    body: &mir::Body,
+    is_f64: bool,
+    args: &[mir::Operand],
+    destination: &mir::Place,
+    target: &Option<usize>,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    value_map: &mut ValueMap,
+    block_map: &[Ptr<BasicBlock>],
+    loc: Location,
+) -> TranslationResult<Ptr<Operation>> {
+    use crate::error::TranslationErr;
+    use crate::translator::rvalue;
+    use dialect_mir::ops::{MirCallOp, MirConstructTupleOp};
+    use pliron::builtin::attributes::StringAttr;
+    use pliron::input_err;
+    use pliron::location::Located;
+    use pliron::op::Op;
+
+    // Destination tuple type and its scalar element type.
+    let tuple_ty = types::translate_type(ctx, &body.locals()[destination.local].ty)?;
+    let scalar_ty = {
+        let r = tuple_ty.deref(ctx);
+        match r.downcast_ref::<dialect_mir::types::MirTupleType>() {
+            Some(t) => t.get_types()[0],
+            None => {
+                return input_err!(
+                    loc.clone(),
+                    TranslationErr::unsupported(
+                        "libm::sincos destination is not a tuple".to_string()
+                    )
+                );
+            }
+        }
+    };
+
+    // Translate the angle argument once and reuse it for both calls.
+    let (arg_value, last_op) = rvalue::translate_operand(
+        ctx,
+        body,
+        &args[0],
+        value_map,
+        block_ptr,
+        prev_op,
+        loc.clone(),
+    )?;
+
+    let (sin_callee, cos_callee) = if is_f64 {
+        (rust_intrinsics::CALLEE_SIN_F64, rust_intrinsics::CALLEE_COS_F64)
+    } else {
+        (rust_intrinsics::CALLEE_SIN_F32, rust_intrinsics::CALLEE_COS_F32)
+    };
+
+    let callee_id = pliron::identifier::Identifier::try_from("callee").unwrap();
+
+    // sin(x)
+    let sin_op = Operation::new(
+        ctx,
+        MirCallOp::get_concrete_op_info(),
+        vec![scalar_ty],
+        vec![arg_value],
+        vec![],
+        0,
+    );
+    sin_op.deref_mut(ctx).set_loc(loc.clone());
+    sin_op
+        .deref_mut(ctx)
+        .attributes
+        .0
+        .insert(callee_id.clone(), StringAttr::new(sin_callee.into()).into());
+    if let Some(prev) = last_op {
+        sin_op.insert_after(ctx, prev);
+    } else {
+        sin_op.insert_at_front(block_ptr, ctx);
+    }
+    let sin_val = sin_op.deref(ctx).get_result(0);
+
+    // cos(x)
+    let cos_op = Operation::new(
+        ctx,
+        MirCallOp::get_concrete_op_info(),
+        vec![scalar_ty],
+        vec![arg_value],
+        vec![],
+        0,
+    );
+    cos_op.deref_mut(ctx).set_loc(loc.clone());
+    cos_op
+        .deref_mut(ctx)
+        .attributes
+        .0
+        .insert(callee_id, StringAttr::new(cos_callee.into()).into());
+    cos_op.insert_after(ctx, sin_op);
+    let cos_val = cos_op.deref(ctx).get_result(0);
+
+    // Pack (sin, cos) into the destination tuple.
+    let tuple_op = Operation::new(
+        ctx,
+        MirConstructTupleOp::get_concrete_op_info(),
+        vec![tuple_ty],
+        vec![sin_val, cos_val],
+        vec![],
+        0,
+    );
+    tuple_op.deref_mut(ctx).set_loc(loc.clone());
+    tuple_op.insert_after(ctx, cos_op);
+    let tuple_val = tuple_op.deref(ctx).get_result(0);
+
+    let goto_prev = value_map
+        .store_local(ctx, destination.local, tuple_val, block_ptr, Some(tuple_op))
+        .unwrap_or(tuple_op);
+
+    if let Some(target_idx) = target {
+        Ok(helpers::emit_goto(ctx, *target_idx, goto_prev, block_map, loc))
+    } else {
+        input_err!(
+            loc.clone(),
+            TranslationErr::unsupported("libm::sincos call without target not supported".to_string())
+        )
     }
 }
 
