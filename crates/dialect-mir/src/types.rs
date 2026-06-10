@@ -563,9 +563,14 @@ impl EnumVariant {
 ///
 /// Represents Rust enums like `Option<T>`, `Result<T,E>`, and custom enums.
 ///
-/// Memory layout follows Rust's enum representation:
-/// - Discriminant (integer type based on variant count)
-/// - Payload (union of all variant payloads, sized to largest)
+/// Lowered as a `{tag, variant fields...}` struct:
+/// - Discriminant tag sourced from rustc's layout (width AND signedness of
+///   the tag scalar for Direct-tag enums; a variant-count fallback for the
+///   niched / single-variant models, which are deliberately un-niched)
+/// - All variants' payload fields concatenated in declaration order (NOT
+///   overlapped like Rust's real layout). mir-lower uses `total_size` to pad
+///   the struct to rustc's size, or to reject memory traversal loudly when
+///   concatenation makes the struct larger than the Rust object.
 ///
 /// Note: For simplicity, we store variant info in flattened vectors
 /// since the `#[format_type]` macro has trouble with nested structs.
@@ -575,13 +580,16 @@ impl EnumVariant {
 /// * Discriminant type must be an integer type.
 #[pliron_type(
     name = "mir.enum",
-    format = "`<` $name `,` $discriminant_ty `,` `[` vec($variant_names, CharSpace(`,`)) `]` `,` `[` vec($variant_field_counts, CharSpace(`,`)) `]` `,` `[` vec($all_field_types, CharSpace(`,`)) `]` `>`"
+    format = "`<` $name `,` $discriminant_ty `,` `[` vec($variant_names, CharSpace(`,`)) `]` `,` `[` vec($variant_field_counts, CharSpace(`,`)) `]` `,` `[` vec($all_field_types, CharSpace(`,`)) `]` `,` $total_size `,` $abi_align `>`"
 )]
 #[derive(Hash, PartialEq, Eq, Debug, Clone)]
 pub struct MirEnumType {
     /// The enum name (e.g., "Option", "Result")
     pub name: String,
-    /// The discriminant type (usually u8, u16, or u32)
+    /// The discriminant type, sourced from rustc's layout: the tag scalar's
+    /// width and signedness for Direct-tag enums (so `#[repr(uN/iN)]`,
+    /// `#[repr(C)]`, sparse and negative discriminants are all honoured); a
+    /// variant-count fallback for the niched / single-variant models.
     pub discriminant_ty: Ptr<TypeObj>,
     /// Variant names in order
     pub variant_names: Vec<String>,
@@ -589,15 +597,42 @@ pub struct MirEnumType {
     pub variant_field_counts: Vec<u32>,
     /// All field types concatenated (use variant_field_counts to split)
     pub all_field_types: Vec<Ptr<TypeObj>>,
+    /// Total enum size in bytes from rustc layout (including padding).
+    /// 0 means unknown / not memory-faithful; mir-lower then keeps the
+    /// plain concatenated `{tag, fields...}` struct as-is.
+    ///
+    /// Populated only for `TagEncoding::Direct` enums: niched and
+    /// single-variant shapes use an un-niched model whose size has
+    /// nothing to do with rustc's layout, so they stay 0.
+    pub total_size: u64,
+    /// ABI alignment in bytes, from rustc layout. 0 means unknown.
+    pub abi_align: u64,
 }
 
 impl MirEnumType {
-    /// Create a new enum type from EnumVariant definitions.
+    /// Create a new enum type from EnumVariant definitions, without
+    /// rustc layout information (size/align unknown).
     pub fn get(
         ctx: &mut Context,
         name: String,
         discriminant_ty: Ptr<TypeObj>,
         variants: Vec<EnumVariant>,
+    ) -> TypePtr<Self> {
+        Self::get_with_layout(ctx, name, discriminant_ty, variants, 0, 0)
+    }
+
+    /// Create a new enum type with rustc layout information.
+    ///
+    /// # Arguments
+    /// * `total_size` - Total enum size in bytes from rustc layout (0 = unknown)
+    /// * `abi_align` - ABI alignment in bytes (0 = unknown)
+    pub fn get_with_layout(
+        ctx: &mut Context,
+        name: String,
+        discriminant_ty: Ptr<TypeObj>,
+        variants: Vec<EnumVariant>,
+        total_size: u64,
+        abi_align: u64,
     ) -> TypePtr<Self> {
         // Flatten variants into parallel vectors
         let mut variant_names = Vec::with_capacity(variants.len());
@@ -617,6 +652,8 @@ impl MirEnumType {
                 variant_names,
                 variant_field_counts,
                 all_field_types,
+                total_size,
+                abi_align,
             },
             ctx,
         )
@@ -630,6 +667,18 @@ impl MirEnumType {
     /// Get the discriminant type.
     pub fn discriminant_type(&self) -> Ptr<TypeObj> {
         self.discriminant_ty
+    }
+
+    /// Get total enum size in bytes from rustc layout.
+    /// Returns 0 if size is not known.
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    /// Get the ABI alignment in bytes from rustc layout.
+    /// Returns 0 if alignment is not known.
+    pub fn abi_align(&self) -> u64 {
+        self.abi_align
     }
 
     /// Get the number of variants.
