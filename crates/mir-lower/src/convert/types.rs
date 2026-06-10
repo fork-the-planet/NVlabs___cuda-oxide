@@ -78,7 +78,7 @@
 //! When rustc's total size is known (Direct-tag enums), the struct is padded
 //! with a trailing `[N x i8]` to match it; multi-payload enums whose
 //! concatenation exceeds rustc's size are rejected at memory-traversal sites.
-//! See [`convert_enum_to_llvm`].
+//! See `convert_enum_to_llvm` in this module.
 //!
 //! # Function Type Conversion
 //!
