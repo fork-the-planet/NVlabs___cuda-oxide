@@ -34,7 +34,8 @@
 //! `rustc`'s `discriminant_for_variant`.
 
 use crate::convert::types::{
-    StructLayoutInfo, StructSlotMap, build_struct_slot_map, convert_type, make_slice_struct,
+    EnumSlotMap, StructLayoutInfo, StructSlotMap, build_enum_slot_map, build_struct_slot_map,
+    convert_type, is_zero_sized_type, make_slice_struct,
 };
 use dialect_mir::ops::{
     MirConstructEnumOp, MirEnumPayloadOp, MirExtractFieldOp, MirFieldAddrOp, MirInsertFieldOp,
@@ -53,7 +54,7 @@ use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::printable::Printable;
 use pliron::result::Result;
-use pliron::r#type::Typed;
+use pliron::r#type::{TypeObj, Typed};
 use pliron::utils::apint::APInt;
 use pliron::value::Value;
 use std::num::NonZeroUsize;
@@ -499,9 +500,73 @@ pub(crate) fn convert_extract_array_element(
     Ok(())
 }
 
+/// Spill an enum SSA value into a fresh stack slot so byte-precise
+/// (filler-resident) payload accesses can be made against it. Returns the
+/// slot pointer. The slot is stamped with the enum's rustc ABI alignment:
+/// a filler-heavy struct like `{ i8, [7 x i8] }` has natural alignment 1
+/// while rustc may demand 8.
+///
+/// The alloca is emitted at the use site, like
+/// [`convert_extract_array_element`]; `opt -O2` (SROA) eliminates it.
+/// Hoisting these to the function entry block is a known follow-up for
+/// the `CUDA_OXIDE_NO_OPT=1` path.
+fn spill_enum_value(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    enum_val: Value,
+    llvm_struct_ty: Ptr<TypeObj>,
+    abi_align: u64,
+) -> Value {
+    let i64_ty = IntegerType::get(ctx, 64, Signedness::Signless);
+    let one_apint = APInt::from_i64(1, NonZeroUsize::new(64).unwrap());
+    let one_attr = pliron::builtin::attributes::IntegerAttr::new(i64_ty, one_apint);
+    let one_const = llvm::ConstantOp::new(ctx, one_attr.into());
+    rewriter.insert_operation(ctx, one_const.get_operation());
+    let one_val = one_const.get_operation().deref(ctx).get_result(0);
+
+    let alloca_op = llvm::AllocaOp::new(ctx, llvm_struct_ty, one_val);
+    rewriter.insert_operation(ctx, alloca_op.get_operation());
+    if abi_align > 0 {
+        llvm_export::ops::set_op_alignment(ctx, alloca_op.get_operation(), abi_align as u32);
+    }
+    let slot_ptr = alloca_op.get_operation().deref(ctx).get_result(0);
+
+    let store_op = llvm::StoreOp::new(ctx, enum_val, slot_ptr);
+    rewriter.insert_operation(ctx, store_op.get_operation());
+    if abi_align > 0 {
+        llvm_export::ops::set_op_alignment(ctx, store_op.get_operation(), abi_align as u32);
+    }
+    slot_ptr
+}
+
+/// Byte-precise pointer `base + offset` into an enum spill slot
+/// (`getelementptr i8, ptr base, offset`).
+fn enum_byte_gep(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    base: Value,
+    offset: u64,
+) -> Value {
+    use llvm_export::ops::GepIndex;
+    let i8_ty: Ptr<TypeObj> = IntegerType::get(ctx, 8, Signedness::Signless).into();
+    let gep_op = llvm::GetElementPtrOp::new(
+        ctx,
+        base,
+        vec![GepIndex::Constant(offset as u32)],
+        i8_ty,
+    );
+    rewriter.insert_operation(ctx, gep_op.get_operation());
+    gep_op.get_operation().deref(ctx).get_result(0)
+}
+
 /// Convert `mir.construct_enum` to LLVM struct operations.
 ///
-/// Enums are `{discriminant, payload...}` structs.
+/// The struct shape and every index into it come from
+/// [`build_enum_slot_map`] (never hand-computed): the tag is inserted at
+/// `tag_slot` with the variant's declared discriminant VALUE, payload
+/// fields with typed slots are `insertvalue`d, and filler-resident fields
+/// (bytes that collide with another variant's field of a different type)
+/// are written through a stack spill at their rustc byte offsets.
 pub(crate) fn convert_construct_enum(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -522,12 +587,19 @@ pub(crate) fn convert_construct_enum(
         (result_ty, operands, variant_index)
     };
 
-    let (variant_discriminants, variant_field_counts): (Vec<u64>, Vec<u32>) = {
+    let (variant_discriminants, variant_field_counts, mir_discr_ty, abi_align): (
+        Vec<u64>,
+        Vec<u32>,
+        Ptr<TypeObj>,
+        u64,
+    ) = {
         let ty_ref = result_ty.deref(ctx);
         match ty_ref.downcast_ref::<MirEnumType>() {
             Some(e) => (
                 e.variant_discriminants.clone(),
                 e.variant_field_counts.clone(),
+                e.discriminant_ty,
+                e.abi_align(),
             ),
             None => {
                 return pliron::input_err_noloc!(
@@ -538,22 +610,13 @@ pub(crate) fn convert_construct_enum(
     };
 
     // Build the value with the CONVERTED enum type (the same one the type
-    // converter produces for block args, loads, allocas, ...), so constructed
-    // values and the converted type cannot diverge. The converter returns
-    // `{tag, fields..., [pad]?}`; any trailing pad field is simply never
-    // written. Field 0 is always the discriminant.
-    let llvm_struct_ty = convert_type(ctx, result_ty).map_err(anyhow_to_pliron)?;
-    let llvm_discriminant_ty = {
-        let ty_ref = llvm_struct_ty.deref(ctx);
-        let struct_ty = ty_ref
-            .downcast_ref::<llvm_export::types::StructType>()
-            .ok_or_else(|| {
-                pliron::input_error_noloc!("converted MirEnumType must be an LLVM struct")
-            })?;
-        struct_ty.fields().next().ok_or_else(|| {
-            pliron::input_error_noloc!("converted MirEnumType struct must have a tag field")
-        })?
-    };
+    // converter produces for block args, loads, allocas, ...) and the slot
+    // map derived in the same walk, so constructed values and the
+    // converted type cannot diverge. Filler slots are simply never
+    // written.
+    let slot_map = build_enum_slot_map(ctx, result_ty).map_err(anyhow_to_pliron)?;
+    let llvm_struct_ty = slot_map.llvm_struct_ty;
+    let llvm_discriminant_ty = convert_type(ctx, mir_discr_ty).map_err(anyhow_to_pliron)?;
 
     let undef_op = llvm::UndefOp::new(ctx, llvm_struct_ty);
     rewriter.insert_operation(ctx, undef_op.get_operation());
@@ -598,61 +661,134 @@ pub(crate) fn convert_construct_enum(
     rewriter.insert_operation(ctx, discr_const.get_operation());
     let discr_val = discr_const.get_operation().deref(ctx).get_result(0);
 
-    let insert_discr = llvm::InsertValueOp::new(ctx, current_struct, discr_val, vec![0]);
+    let insert_discr =
+        llvm::InsertValueOp::new(ctx, current_struct, discr_val, vec![slot_map.tag_slot]);
     rewriter.insert_operation(ctx, insert_discr.get_operation());
     current_struct = insert_discr.get_operation().deref(ctx).get_result(0);
 
-    let field_offset: usize = variant_field_counts
+    let field_base: usize = variant_field_counts
         .iter()
         .take(variant_index)
         .map(|&c| c as usize)
         .sum();
 
+    // SSA-insert every payload field that owns a typed slot; collect the
+    // filler-resident remainder for the memory pass below.
+    let mut deferred: Vec<(usize, Value)> = Vec::new();
     let mut last_op = insert_discr.get_operation();
     for (i, operand) in operands.into_iter().enumerate() {
-        let llvm_idx = 1 + field_offset + i;
-        let insert_op =
-            llvm::InsertValueOp::new(ctx, current_struct, operand, vec![llvm_idx as u32]);
-        rewriter.insert_operation(ctx, insert_op.get_operation());
-        current_struct = insert_op.get_operation().deref(ctx).get_result(0);
-        last_op = insert_op.get_operation();
+        let flat = field_base + i;
+        let Some(slot) = slot_map.field_slots.get(flat) else {
+            return pliron::input_err_noloc!(
+                "MirConstructEnumOp field {} of variant {} is out of range for the enum's {} fields",
+                i,
+                variant_index,
+                slot_map.field_slots.len()
+            );
+        };
+        match slot {
+            Some(slot) => {
+                let insert_op =
+                    llvm::InsertValueOp::new(ctx, current_struct, operand, vec![*slot]);
+                rewriter.insert_operation(ctx, insert_op.get_operation());
+                current_struct = insert_op.get_operation().deref(ctx).get_result(0);
+                last_op = insert_op.get_operation();
+            }
+            None => {
+                // Zero-sized fields own no bytes; nothing to write.
+                if is_zero_sized_type(ctx, slot_map.field_llvm_types[flat]) {
+                    continue;
+                }
+                deferred.push((flat, operand));
+            }
+        }
     }
 
-    rewriter.replace_operation(ctx, op, last_op);
+    if deferred.is_empty() {
+        rewriter.replace_operation(ctx, op, last_op);
+        return Ok(());
+    }
+
+    // Filler-resident fields: spill the partially-built value, store each
+    // remaining payload at its rustc byte offset, and load the completed
+    // enum back as the result.
+    let slot_ptr = spill_enum_value(ctx, rewriter, current_struct, llvm_struct_ty, abi_align);
+    for (flat, operand) in deferred {
+        let field_ptr = enum_byte_gep(ctx, rewriter, slot_ptr, slot_map.field_offsets[flat]);
+        let store_op = llvm::StoreOp::new(ctx, operand, field_ptr);
+        rewriter.insert_operation(ctx, store_op.get_operation());
+    }
+    let load_op = llvm::LoadOp::new(ctx, slot_ptr, llvm_struct_ty);
+    rewriter.insert_operation(ctx, load_op.get_operation());
+    if abi_align > 0 {
+        llvm_export::ops::set_op_alignment(ctx, load_op.get_operation(), abi_align as u32);
+    }
+    rewriter.replace_operation(ctx, op, load_op.get_operation());
 
     Ok(())
 }
 
+/// Look up the pre-conversion `MirEnumType` of a converted enum operand
+/// and build its slot map (plus the rustc ABI alignment, for spill slots).
+fn enum_slot_map_of_operand(
+    ctx: &mut Context,
+    operands_info: &OperandsInfo,
+    enum_val: Value,
+) -> Result<(EnumSlotMap, u64)> {
+    // Clone the type data out so the `Ref` borrow of `ctx` ends before
+    // re-interning (types are hash-consed: registering an equal instance
+    // returns the existing pointer).
+    let enum_ty: MirEnumType = {
+        match operands_info.lookup_most_recent_of_type::<MirEnumType>(ctx, enum_val) {
+            Some(r) => r.clone(),
+            None => {
+                return pliron::input_err_noloc!("Expected MirEnumType for enum value access");
+            }
+        }
+    };
+    let abi_align = enum_ty.abi_align();
+    let mir_ty: Ptr<TypeObj> = pliron::r#type::Type::register_instance(enum_ty, ctx).into();
+    let map = build_enum_slot_map(ctx, mir_ty).map_err(anyhow_to_pliron)?;
+    Ok((map, abi_align))
+}
+
 /// Convert `mir.get_discriminant` to `llvm.extractvalue`.
 ///
-/// Extracts the discriminant (tag) from an enum value. The discriminant
-/// is always at index 0 in the LLVM struct representation, and it holds
-/// the variant's DECLARED discriminant value (what `construct_enum`
-/// stored), so downstream `SwitchInt` comparisons match against
-/// discriminant values, never variant indices.
+/// Extracts the discriminant (tag) from an enum value at the slot map's
+/// `tag_slot` (the tag is usually the first slot, but rustc may place it
+/// after payload bytes). The tag holds the variant's DECLARED
+/// discriminant value (what `construct_enum` stored), so downstream
+/// `SwitchInt` comparisons match against discriminant values, never
+/// variant indices.
 pub(crate) fn convert_get_discriminant(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
     op: Ptr<Operation>,
-    _operands_info: &OperandsInfo,
+    operands_info: &OperandsInfo,
 ) -> Result<()> {
     let enum_val = match op.deref(ctx).operands().next() {
         Some(v) => v,
         None => return pliron::input_err_noloc!("MirGetDiscriminantOp requires an operand"),
     };
 
-    let extract_op = llvm::ExtractValueOp::new(ctx, enum_val, vec![0])?;
+    let (slot_map, _abi_align) = enum_slot_map_of_operand(ctx, operands_info, enum_val)?;
+
+    let extract_op = llvm::ExtractValueOp::new(ctx, enum_val, vec![slot_map.tag_slot])?;
     rewriter.insert_operation(ctx, extract_op.get_operation());
     rewriter.replace_operation(ctx, op, extract_op.get_operation());
 
     Ok(())
 }
 
-/// Convert `mir.enum_payload` to `llvm.extractvalue`.
+/// Convert `mir.enum_payload` to a payload-field read.
 ///
-/// Extracts a field from an enum variant's payload. The LLVM struct index
-/// is computed as: `1 + sum(field_counts[0..variant]) + field_index`
-/// where 1 accounts for the discriminant at index 0.
+/// Fields owning a typed slot in the [`EnumSlotMap`] are read with
+/// `llvm.extractvalue`. Filler-resident fields (bytes colliding with
+/// another variant's field of a different type) are read through a stack
+/// spill at their rustc byte offset: alloca + store + `gep i8` + typed
+/// load, the same bitcast-free reinterpretation
+/// [`convert_extract_array_element`] uses. Zero-sized fields read as
+/// `undef` of their converted type.
 pub(crate) fn convert_enum_payload(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -684,18 +820,49 @@ pub(crate) fn convert_enum_payload(
             }
         }
     };
+    let (slot_map, abi_align) = enum_slot_map_of_operand(ctx, operands_info, enum_val)?;
 
-    let field_offset: usize = variant_field_counts
+    let field_base: usize = variant_field_counts
         .iter()
         .take(variant_index)
         .map(|&c| c as usize)
         .sum();
+    let flat = field_base + field_index;
+    let Some(slot) = slot_map.field_slots.get(flat).copied() else {
+        return pliron::input_err_noloc!(
+            "MirEnumPayloadOp field {} of variant {} is out of range for the enum's {} fields",
+            field_index,
+            variant_index,
+            slot_map.field_slots.len()
+        );
+    };
 
-    let llvm_idx = 1 + field_offset + field_index;
-
-    let extract_op = llvm::ExtractValueOp::new(ctx, enum_val, vec![llvm_idx as u32])?;
-    rewriter.insert_operation(ctx, extract_op.get_operation());
-    rewriter.replace_operation(ctx, op, extract_op.get_operation());
+    match slot {
+        Some(slot) => {
+            let extract_op = llvm::ExtractValueOp::new(ctx, enum_val, vec![slot])?;
+            rewriter.insert_operation(ctx, extract_op.get_operation());
+            rewriter.replace_operation(ctx, op, extract_op.get_operation());
+        }
+        None if is_zero_sized_type(ctx, slot_map.field_llvm_types[flat]) => {
+            let undef_op = llvm::UndefOp::new(ctx, slot_map.field_llvm_types[flat]);
+            rewriter.insert_operation(ctx, undef_op.get_operation());
+            rewriter.replace_operation(ctx, op, undef_op.get_operation());
+        }
+        None => {
+            let slot_ptr = spill_enum_value(
+                ctx,
+                rewriter,
+                enum_val,
+                slot_map.llvm_struct_ty,
+                abi_align,
+            );
+            let field_ptr =
+                enum_byte_gep(ctx, rewriter, slot_ptr, slot_map.field_offsets[flat]);
+            let load_op = llvm::LoadOp::new(ctx, field_ptr, slot_map.field_llvm_types[flat]);
+            rewriter.insert_operation(ctx, load_op.get_operation());
+            rewriter.replace_operation(ctx, op, load_op.get_operation());
+        }
+    }
 
     Ok(())
 }

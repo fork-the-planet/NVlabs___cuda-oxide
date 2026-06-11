@@ -985,8 +985,9 @@ mod tests {
             );
         }
 
-        // u8 tag + i64 payload, rustc size 16: natural alignment already
-        // places the payload at offset 8, so no explicit pad is needed.
+        // u8 tag + i64 payload, rustc size 16: the slot map places the
+        // payload at its rustc byte offset 8 behind an explicit
+        // [7 x i8] filler, making the layout datalayout-independent.
         let i64_payload: Ptr<TypeObj> = IntegerType::get(&mut ctx, 64, Signedness::Unsigned).into();
         let payload = make_enum_ty(
             &mut ctx,
@@ -1006,7 +1007,71 @@ mod tests {
         let struct_ty = conv_ref
             .downcast_ref::<llvm_export::types::StructType>()
             .expect("converted enum is a struct");
-        assert_eq!(struct_ty.fields().count(), 2, "{{tag, payload}} only");
+        assert_eq!(
+            struct_ty.fields().count(),
+            3,
+            "{{tag, [7 x i8] filler, payload}}: explicit filler to byte 8"
+        );
+    }
+
+    /// Multi-payload enum: variants overlap in Rust, and identical
+    /// (offset, converted type) payloads share one typed slot, so the
+    /// converted struct is byte-identical to rustc's layout AND every
+    /// access stays pure SSA (no spill).
+    #[test]
+    fn multi_payload_enum_shares_payload_slot() {
+        use crate::convert::types::{build_enum_slot_map, llvm_type_size_align};
+
+        let mut ctx = make_ctx();
+        let e = make_divergent_enum_ty(&mut ctx);
+        let map = build_enum_slot_map(&mut ctx, e).unwrap();
+        assert_eq!(map.tag_slot, 0);
+        assert_eq!(
+            map.field_slots,
+            vec![Some(1), Some(1)],
+            "A.0 and B.0 overlap at byte 4 with the same type: one shared slot"
+        );
+        assert_eq!(
+            llvm_type_size_align(&ctx, map.llvm_struct_ty),
+            (8, 4),
+            "byte-identical to rustc's 8-byte layout, not the 12-byte concat"
+        );
+    }
+
+    /// rustc may place the tag AFTER payload bytes; the slot map must
+    /// follow the recorded tag_offset, never assume slot 0.
+    #[test]
+    fn enum_slot_map_tag_not_at_zero() {
+        use crate::convert::types::{build_enum_slot_map, llvm_type_size_align};
+
+        let mut ctx = make_ctx();
+        let u64_a: Ptr<TypeObj> = IntegerType::get(&mut ctx, 64, Signedness::Unsigned).into();
+        let u64_b: Ptr<TypeObj> = IntegerType::get(&mut ctx, 64, Signedness::Unsigned).into();
+        let tag_ty: Ptr<TypeObj> = IntegerType::get(&mut ctx, 8, Signedness::Unsigned).into();
+        // enum F { A(u64), B(u64) }: payloads share byte 0, tag at byte 8.
+        let ty: Ptr<TypeObj> = MirEnumType::get_with_layout(
+            &mut ctx,
+            "TagAtEight".to_string(),
+            tag_ty,
+            vec![0, 1],
+            vec![
+                EnumVariant::new_with_offsets("A".to_string(), vec![u64_a], vec![0]),
+                EnumVariant::new_with_offsets("B".to_string(), vec![u64_b], vec![0]),
+            ],
+            8,
+            16,
+            8,
+        )
+        .into();
+        let map = build_enum_slot_map(&mut ctx, ty).unwrap();
+        assert_eq!(
+            map.field_slots,
+            vec![Some(0), Some(0)],
+            "payloads share the first slot"
+        );
+        assert_eq!(map.tag_slot, 1, "tag claims its own slot at byte 8");
+        let (size, _align) = llvm_type_size_align(&ctx, map.llvm_struct_ty);
+        assert_eq!(size, 16, "{{ i64, i8, [7 x i8] }}");
     }
 
     /// Multi-payload enum whose variants overlap in Rust (8 bytes) but

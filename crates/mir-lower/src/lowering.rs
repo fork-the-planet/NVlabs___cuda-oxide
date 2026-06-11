@@ -532,21 +532,32 @@ fn anyhow_to_pliron(e: anyhow::Error) -> pliron::result::Error {
 // ============================================================================
 
 /// Returns the over-alignment (bytes) carried by `ty` if it is a
-/// `MirStructType` with a known `repr(align)`-raised alignment, else `None`.
-fn struct_over_align(ctx: &Context, ty: Ptr<TypeObj>) -> Option<u64> {
-    ty.deref(ctx)
-        .downcast_ref::<MirStructType>()
-        .map(|s| s.abi_align)
-        .filter(|a| *a > 0)
+/// `MirStructType` or a memory-faithful `MirEnumType` with a known rustc
+/// ABI alignment, else `None`.
+///
+/// Enums need this because their faithful representation can be
+/// filler-heavy: `{ i8, [7 x i8] }` has natural alignment 1 while rustc
+/// demands 8, so the natural alignment of the converted struct cannot be
+/// trusted for allocas/loads/stores of enum values.
+fn aggregate_over_align(ctx: &Context, ty: Ptr<TypeObj>) -> Option<u64> {
+    let ty_ref = ty.deref(ctx);
+    if let Some(s) = ty_ref.downcast_ref::<MirStructType>() {
+        return Some(s.abi_align).filter(|a| *a > 0);
+    }
+    if let Some(e) = ty_ref.downcast_ref::<dialect_mir::types::MirEnumType>() {
+        return Some(e.abi_align()).filter(|a| *a > 0);
+    }
+    None
 }
 
 /// Stamp the true ABI alignment onto every `mir.load`, `mir.store`,
 /// `mir.alloca`, and `mir.ref` whose accessed/allocated type carries a
-/// `repr(align(N))` raise in `MirStructType.abi_align`.
+/// rustc ABI alignment in `MirStructType.abi_align` /
+/// `MirEnumType.abi_align`.
 ///
 /// Must run BEFORE `inline_region` moves the blocks and BEFORE dialect
 /// conversion replaces MIR types with LLVM types, since the alignment
-/// information lives on `MirStructType` and is not expressible on LLVM
+/// information lives on the MIR types and is not expressible on LLVM
 /// struct types.
 fn stamp_memory_op_alignment(ctx: &mut Context, mir_blocks: &[Ptr<BasicBlock>]) {
     let load_id = dialect_mir::ops::MirLoadOp::get_opid_static();
@@ -562,10 +573,10 @@ fn stamp_memory_op_alignment(ctx: &mut Context, mir_blocks: &[Ptr<BasicBlock>]) 
             let op_id = Operation::get_opid(op, ctx);
             let align = if op_id == load_id {
                 // load: result(0) is the loaded value.
-                struct_over_align(ctx, op.deref(ctx).get_result(0).get_type(ctx))
+                aggregate_over_align(ctx, op.deref(ctx).get_result(0).get_type(ctx))
             } else if op_id == store_id {
                 // store: operand(1) is the stored value.
-                struct_over_align(ctx, op.deref(ctx).get_operand(1).get_type(ctx))
+                aggregate_over_align(ctx, op.deref(ctx).get_operand(1).get_type(ctx))
             } else if op_id == alloca_id {
                 // alloca: pointee type lives inside the MirPtrType result.
                 let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
@@ -573,12 +584,12 @@ fn stamp_memory_op_alignment(ctx: &mut Context, mir_blocks: &[Ptr<BasicBlock>]) 
                     .deref(ctx)
                     .downcast_ref::<MirPtrType>()
                     .map(|p| p.pointee)
-                    .and_then(|pointee| struct_over_align(ctx, pointee))
+                    .and_then(|pointee| aggregate_over_align(ctx, pointee))
             } else if op_id == ref_id {
                 // ref: operand(0) is the value being referenced (spilled to
                 // stack). If it is an over-aligned struct, the synthesised
                 // alloca+store in convert_ref must honour that alignment.
-                struct_over_align(ctx, op.deref(ctx).get_operand(0).get_type(ctx))
+                aggregate_over_align(ctx, op.deref(ctx).get_operand(0).get_type(ctx))
             } else {
                 None
             };
