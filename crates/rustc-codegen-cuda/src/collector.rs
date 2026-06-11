@@ -470,15 +470,14 @@ fn rust_alloc_shim_name(fn_path: &str) -> Option<&str> {
         "handle_alloc_error",
     ];
     let last = fn_path.rsplit("::").next().unwrap_or(fn_path);
-    // `__rust_*` names are reserved by the compiler, so a bare-name match
-    // is safe. `handle_alloc_error` is an ordinary identifier a user could
-    // reuse, so additionally require that it comes from the `alloc` crate
-    // (its `def_path_str` is `alloc::alloc::handle_alloc_error` or the
-    // `std::alloc::...` re-export spelling).
+    // None of these names is actually reserved: a user may legally define
+    // their own `__rust_alloc` or `handle_alloc_error`, and such functions
+    // compile for the device like any other. So a bare-name match is not
+    // enough; the path must also come from the sysroot allocator machinery
+    // (`alloc::alloc::*`, or the `std::alloc::*` re-export spelling). The
+    // caller additionally skips local definitions by `DefId`.
     let matched = SHIMS.iter().find(|s| **s == last).copied()?;
-    if matched == "handle_alloc_error"
-        && !(fn_path.starts_with("alloc::") || fn_path.starts_with("std::alloc::"))
-    {
+    if !(fn_path.starts_with("alloc::") || fn_path.starts_with("std::alloc::")) {
         return None;
     }
     Some(matched)
@@ -1177,7 +1176,14 @@ impl<'tcx> DeviceCollector<'tcx> {
         // eventually gets a constant-translation error spanned into
         // `alloc/src/boxed.rs`. Fail here instead, at the first point where
         // the allocator is provably reached from device code.
-        if let Some(shim) = rust_alloc_shim_name(&raw_name) {
+        //
+        // Only sysroot functions can be the real allocator entry points. A
+        // user is free to define their own fn named `__rust_alloc` (the
+        // name is not reserved), and that compiles for the device like any
+        // other function, so local definitions must not trip the guard.
+        if !resolved.def_id().is_local()
+            && let Some(shim) = rust_alloc_shim_name(&raw_name)
+        {
             self.report_heap_allocation(shim, caller, &callee_ctx);
         }
 
@@ -1506,7 +1512,9 @@ impl<'tcx> DeviceCollector<'tcx> {
     ///
     /// Functions that are declared diverging (return type `!`) are left
     /// alone: their call sites have no target block, so the translator
-    /// already lowers them to a device-side trap.
+    /// already lowers them to LLVM `unreachable` (note: NOT a trap;
+    /// the optimizer may delete paths that provably reach it, a known
+    /// gap tracked separately).
     fn check_unreachable_callee(
         &self,
         resolved: Instance<'tcx>,
@@ -1591,7 +1599,7 @@ impl<'tcx> DeviceCollector<'tcx> {
         // No stub marker: leave non-local functions to the existing silent
         // skip (this is what keeps the real `cuda_device` intrinsic
         // placeholders and `core`'s cold panic wrappers working), and leave
-        // declared-diverging functions to the translator's trap lowering.
+        // declared-diverging functions to the translator's `unreachable` lowering.
         if !def_id.is_local() || mir.return_ty().is_never() {
             return;
         }
@@ -1620,7 +1628,7 @@ impl<'tcx> DeviceCollector<'tcx> {
             .with_help(
                 "annotate device helpers with `#[device]`; if the panic is \
                  intentional, declare the function as diverging (`-> !`) so the \
-                 call lowers to a device-side trap",
+                 call lowers to LLVM `unreachable`",
             )
             .emit()
     }
@@ -1639,7 +1647,7 @@ impl<'tcx> DeviceCollector<'tcx> {
     ///
     /// Panic calls whose message travels only in the call arguments are
     /// left alone on purpose: diverging call arguments are dropped by the
-    /// translator and the call lowers to a device-side trap, which is the
+    /// translator and the call lowers to LLVM `unreachable`, which is the
     /// supported behavior for conditional panics like `unwrap`.
     fn check_panic_machinery(
         &self,

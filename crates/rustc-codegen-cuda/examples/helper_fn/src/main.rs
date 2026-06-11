@@ -33,8 +33,20 @@ pub fn vecadd_device(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
 
     if let Some(c_elem) = c.get_mut(idx) {
         let i = idx_raw;
-        *c_elem = a[i] + b[i];
+        *c_elem = a[i] + b[i] + __rust_alloc(0.0);
     }
+}
+
+/// Name-collision probe for the heap-allocation guard (issue #108).
+///
+/// `__rust_alloc` is NOT a reserved name: a user may define their own
+/// function with it, and it must compile for the device like any other
+/// helper. The real allocator entry points are recognized by sysroot
+/// origin, never by name alone. This helper adds 0.0, so the example's
+/// expected results are unchanged.
+#[device]
+pub fn __rust_alloc(x: f32) -> f32 {
+    x
 }
 
 // =============================================================================
