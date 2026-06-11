@@ -41,7 +41,14 @@ The 21 checks split into three layers:
 | `match_all_sync`    | constant input ⇒ full warp mask                                |
 | `grid_sync`         | every block sees every other block's pre-barrier marker write  |
 
-`grid_sync` runs as a cooperative launch (`cuda_launch! { ..., cooperative: true }`).
+`grid_sync` (and `typed_grid_sync` in Layer 2) run as cooperative
+launches through the typed path: both kernels carry
+`#[cooperative_launch]` inside a `#[cuda_module]` module, so their
+generated launch methods submit via `cuLaunchKernelEx` with
+`CU_LAUNCH_ATTRIBUTE_COOPERATIVE`. The same module also holds a
+compile-only kernel combining `#[cluster_launch(2, 1, 1)]` with
+`#[cooperative_launch]`, pinning that the two attributes are accepted
+together.
 
 ### Layer 2 — typed cooperative-groups handles (5 checks)
 
