@@ -1765,6 +1765,13 @@ pub unsafe fn tcgen05_ld_16x256b_pure(tmem_addr: u32) -> TmemF32x4 {
 ///
 /// Packed u32 with two bf16 values: `(bf16(b) << 16) | bf16(a)`
 ///
+/// Lane placement: the first argument (`a`) fills bits `[15:0]` and the
+/// second argument (`b`) fills bits `[31:16]`, even though the PTX
+/// operand list prints `b` first. This is the same first-arg-low
+/// convention as [`cvt_f16x2_f32`](crate::convert::cvt_f16x2_f32),
+/// which differs only in its destination element type (f16, not bf16)
+/// and its `lo`/`hi` argument naming.
+///
 /// # Example
 ///
 /// ```rust,ignore

@@ -40,6 +40,7 @@ pub mod bigint;
 pub mod bitops;
 pub mod clc;
 pub mod cluster;
+pub mod convert;
 pub mod debug;
 pub mod float_math;
 pub mod indexing;
