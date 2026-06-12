@@ -20,8 +20,8 @@ use pliron_derive::pliron_op;
 ///
 /// # Operands
 ///
-/// - `lo` (f32): value for bits [15:0]
-/// - `hi` (f32): value for bits [31:16]
+/// - `lo` (f32): value for bits `[15:0]`
+/// - `hi` (f32): value for bits `[31:16]`
 ///
 /// # Results
 ///

@@ -25,8 +25,8 @@ use rustc_public::mir;
 /// Emit cvt_f16x2_f32: convert two f32 values to packed f16x2 (u32).
 ///
 /// Args:
-/// - args[0]: f32 (lo: value for bits [15:0])
-/// - args[1]: f32 (hi: value for bits [31:16])
+/// - `args[0]`: f32 (lo: value for bits `[15:0]`)
+/// - `args[1]`: f32 (hi: value for bits `[31:16]`)
 ///
 /// Returns: u32 (packed f16x2)
 pub fn emit_cvt_f16x2_f32(

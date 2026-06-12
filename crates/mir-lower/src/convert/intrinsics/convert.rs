@@ -5,9 +5,9 @@
 
 //! Type conversion intrinsic lowering.
 //!
-//! | Operation         | PTX                                    |
-//! |-------------------|----------------------------------------|
-//! | `CvtF16x2F32`    | `cvt.rn.f16x2.f32 d, hi, lo;`         |
+//! | Operation     | PTX                           |
+//! |---------------|-------------------------------|
+//! | `CvtF16x2F32` | `cvt.rn.f16x2.f32 d, hi, lo;` |
 
 use llvm_export::ops as llvm;
 use pliron::builtin::types::{IntegerType, Signedness};
@@ -19,14 +19,14 @@ use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::result::Result;
 
-/// Convert `cvt.rn.f16x2.f32` — pack two f32 values into f16x2 (u32).
+/// Convert `cvt.rn.f16x2.f32`: pack two f32 values into f16x2 (u32).
 ///
 /// Operands:
-/// - $1: f32 lo value (bits [15:0])
-/// - $2: f32 hi value (bits [31:16])
+/// - `$1`: f32 lo value (bits `[15:0]`)
+/// - `$2`: f32 hi value (bits `[31:16]`)
 ///
 /// Result:
-/// - $0: u32 packed f16x2
+/// - `$0`: u32 packed f16x2
 pub(crate) fn convert_cvt_f16x2_f32(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,

@@ -20,8 +20,8 @@
 /// Maps to PTX: `cvt.rn.f16x2.f32 d, hi, lo;`
 ///
 /// # Arguments
-/// - `lo`: f32 value for the low 16 bits (bits [15:0])
-/// - `hi`: f32 value for the high 16 bits (bits [31:16])
+/// - `lo`: f32 value for the low 16 bits (bits `[15:0]`)
+/// - `hi`: f32 value for the high 16 bits (bits `[31:16]`)
 ///
 /// # Returns
 /// A u32 containing two packed f16 values.
