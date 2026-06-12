@@ -6,10 +6,10 @@ This section walks through installing cuda-oxide, creating a project, writing a 
 
 ## Install cargo-oxide
 
-If you haven't already, install the build tool:
+If you haven't already, install the build tool with the pinned nightly toolchain:
 
 ```bash
-cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
+cargo +nightly-2026-04-03 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 Verify that your environment is set up correctly:
@@ -154,8 +154,10 @@ function handles, and exposes each `#[kernel]` as a Rust method. The method
 signature mirrors the kernel signature, with device slices mapped to
 `DeviceBuffer` borrows.
 
-`load_kernel_module` and `cuda_launch!` remain available as lower-level APIs for
-manual sidecar artifact loading and custom launch code.
+`load_kernel_module` and `cuda_launch!` remain available as lower-level APIs
+for manual sidecar artifact loading and custom launch code. `cuda_launch!`
+cannot check arguments against the kernel signature, so it is unsafe and must
+be wrapped in `unsafe { }`.
 
 ### Argument scalarization
 

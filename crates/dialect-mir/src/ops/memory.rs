@@ -16,11 +16,7 @@ use pliron::{
     common_traits::Verify,
     context::{Context, Ptr},
     derive::op_interface_impl,
-    irbuild::{
-        inserter::{IRInserter, Inserter},
-        listener::Recorder,
-        rewriter::{IRRewriter, Rewriter},
-    },
+    irbuild::{inserter::Inserter, rewriter::Rewriter},
     location::Located,
     op::Op,
     operation::Operation,
@@ -118,7 +114,7 @@ impl PromotableAllocationInterface for MirAllocaOp {
     fn default_value(
         &self,
         ctx: &mut Context,
-        inserter: &mut IRInserter<Recorder>,
+        inserter: &mut dyn Inserter,
         alloc_info: &AllocInfo,
     ) -> PlironResult<Value> {
         assert!(
@@ -127,14 +123,14 @@ impl PromotableAllocationInterface for MirAllocaOp {
         );
         let undef = MirUndefOp::new(ctx, alloc_info.ty);
         let undef_val = undef.get_operation().deref(ctx).get_result(0);
-        inserter.insert_op(ctx, undef);
+        inserter.insert_op(ctx, &undef);
         Ok(undef_val)
     }
 
     fn promote(
         &self,
         ctx: &mut Context,
-        rewriter: &mut IRRewriter<Recorder>,
+        rewriter: &mut dyn Rewriter,
         alloc_infos: &[AllocInfo],
     ) -> PlironResult<()> {
         assert!(
@@ -285,7 +281,7 @@ impl PromotableOpInterface for MirStoreOp {
         &self,
         ctx: &mut Context,
         alloc_info_reaching_defs: &[(AllocInfo, Value)],
-        rewriter: &mut IRRewriter<Recorder>,
+        rewriter: &mut dyn Rewriter,
     ) -> PlironResult<()> {
         assert!(
             alloc_info_reaching_defs.len() == 1
@@ -383,7 +379,7 @@ impl PromotableOpInterface for MirLoadOp {
         &self,
         ctx: &mut Context,
         alloc_info_reaching_defs: &[(AllocInfo, Value)],
-        rewriter: &mut IRRewriter<Recorder>,
+        rewriter: &mut dyn Rewriter,
     ) -> PlironResult<()> {
         assert!(
             alloc_info_reaching_defs.len() == 1
@@ -692,9 +688,10 @@ impl Verify for MirSharedAllocOp {
 /// MIR device-global address operation.
 ///
 /// Represents the address of an ordinary Rust `static` / `static mut` reachable
-/// from device code. This is lowered to an LLVM global in CUDA global memory
-/// (`addrspace(1)`), unlike [`MirSharedAllocOp`] which is block-local shared
-/// memory.
+/// from device code. Lowered to an LLVM global in CUDA global memory
+/// (`addrspace(1)`) by default, or constant memory (`addrspace(4)`) when the
+/// static was tagged `#[constant]`. The choice is reflected in the result
+/// pointer's address space; the verifier accepts both.
 ///
 /// # Attributes
 ///
@@ -768,10 +765,13 @@ impl Verify for MirGlobalAllocOp {
         let res_ty_obj = res_ty.deref(ctx);
 
         if let Some(ptr_ty) = res_ty_obj.downcast_ref::<MirPtrType>() {
-            if ptr_ty.address_space != crate::types::address_space::GLOBAL {
+            let as_ = ptr_ty.address_space;
+            if as_ != crate::types::address_space::GLOBAL
+                && as_ != crate::types::address_space::CONSTANT
+            {
                 return verify_err!(
                     op.loc(),
-                    "MirGlobalAllocOp result must be in global address space (1)"
+                    "MirGlobalAllocOp result must be in global (1) or constant (4) address space"
                 );
             }
         } else {

@@ -62,6 +62,7 @@ roadmap, **N/A** = not applicable or no identified need.
 | Bi-directional LTOIR Support | **Full** | Rust kernels call CUDA C++ device functions **and** C++ calls Rust device functions. Via NVVM IR → libNVVM → LTOIR → nvJitLink. |
 | Device FFI (`extern "C"`) | **Full** | `#[device] extern "C" { fn ... }` declarations for external LTOIR functions. CUB/CCCL integration demonstrated. |
 | MathDx FFI (cuFFTDx / cuBLASDx) | **Full** | cuFFTDx (8/16/32-point thread-level FFT), cuBLASDx (32x32x32 block-level GEMM) via LTOIR. |
+| Tile interop | **Experimental** | Inter-kernel interop works today: a [cutile-rs Tile kernel](https://github.com/NVlabs/cutile-rs) and a cuda-oxide SIMT PTX kernel can run in one host process on the same CUDA stream over shared device tensors. Intra-kernel Tile interop is work in progress and tracked in [#96](https://github.com/NVlabs/cuda-oxide/issues/96). |
 | Cross-Crate Kernels | **Full** | Kernels and device functions defined in library crates with monomorphization at the binary crate use site. |
 
 ## Compiler: Functions
@@ -78,7 +79,7 @@ roadmap, **N/A** = not applicable or no identified need.
 | Feature | Status | Description |
 |:--------|:-------|:------------|
 | Unified Single-Source Compilation | **Full** | Host and device code in the same file. Custom rustc codegen backend intercepts codegen. No `#[cfg]` needed. |
-| PTX Output | **Full** | Default output: Rust MIR → `dialect-mir` → `mem2reg` → `dialect-llvm` → LLVM IR → `llc` → PTX. Targets sm_80 through sm_100a. |
+| PTX Output | **Full** | Default output: Rust MIR → `dialect-mir` → `mem2reg` → LLVM dialect → LLVM IR → `llc` → PTX. Targets sm_80 through sm_100a. |
 | NVVM IR Output | **Full** | Alternative output for libNVVM consumption with NVVM metadata. |
 | LTOIR Linking | **Full** | Device-side LTO via libNVVM and nvJitLink. |
 | Float Math Intrinsics (libdevice) | **Full** | Rust `f32`/`f64` math methods (`sin`, `cos`, `exp`, `pow`, `sqrt`, ...) lower to CUDA libdevice (`__nv_*`). cuda-oxide auto-detects libdevice usage and emits NVVM IR; `cuda_host::load_kernel_module` (sync) and `cuda_host::load_kernel_module_async` (async) build the cubin via libNVVM + nvJitLink at runtime. |
@@ -140,7 +141,7 @@ roadmap, **N/A** = not applicable or no identified need.
 | Warp Collectives | **Full** | `ballot`, `all`, `any`, `shfl`, `shfl_xor`, `shfl_down`, `shfl_up` (`i32` and `f32`); `match_any` / `match_all` (`i32` and `i64`); `active_mask`. |
 | Warp Reductions / Scans | **Full** | `warp_reduce`, `warp_scan` (inclusive). `Sum`/`Min`/`Max` for `u32`/`i32`/`f32`; `BitAnd`/`BitOr`/`BitXor` for `u32`. |
 | Block Reductions / Scans | **Full** | `block_reduce`, `block_scan` (inclusive). Const-generic over `NUM_WARPS`; same op/type matrix as warp variants; uses `__shared__` scratch. |
-| Cooperative Kernel Launch | **Full** | `cuda_launch! { cooperative: true, ... }` enables `Grid::sync()` for grid-wide barriers. |
+| Cooperative Kernel Launch | **Full** | `#[cooperative_launch]` on a `#[cuda_module]` kernel (or `unsafe { cuda_launch! { cooperative: true, ... } }`) enables `Grid::sync()` for grid-wide barriers. |
 
 ## Runtime Library: Debug
 
@@ -155,7 +156,7 @@ roadmap, **N/A** = not applicable or no identified need.
 | Feature | Status | Description |
 |:--------|:-------|:------------|
 | `#[cuda_module]` Typed Launch | **Full** | Embedded module loading with typed sync/async launch methods. |
-| `cuda_launch!` Macro | **Full** | Lower-level launch with explicit module loading and wrappers. |
+| `cuda_launch!` Macro | **Full** | Unsafe lower-level launch for runtime-loaded modules; requires `unsafe { }`. |
 | `#[launch_bounds]` | **Full** | Occupancy hints: max threads per block, min blocks per SM. |
 | `#[cluster_launch]` | **Full** | Compile-time cluster dimensions. Emits `.reqnctapercluster` in PTX. |
 

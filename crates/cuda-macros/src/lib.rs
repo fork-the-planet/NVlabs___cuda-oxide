@@ -51,12 +51,12 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use reserved_oxide_symbols::{
     DEVICE_EXTERN_PREFIX, DEVICE_PREFIX, INSTANTIATE_PREFIX, KERNEL_PREFIX, KERNEL_SCOPE_LOCAL,
-    RESERVED_ROOT, kernel_symbol,
+    RESERVED_ROOT, artifact_anchor_symbol, constant_symbol, kernel_symbol,
 };
 use syn::{
     Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, ForeignItem, GenericArgument, GenericParam,
-    Ident, Item, ItemFn, ItemForeignMod, ItemMod, Pat, Path, PathArguments, Stmt, Token, Type,
-    bracketed, parenthesized,
+    Ident, Item, ItemFn, ItemForeignMod, ItemMod, LitStr, Pat, Path, PathArguments, Stmt, Token,
+    Type, bracketed, parenthesized,
     parse::{Parse, ParseStream},
     parse_macro_input, parse_quote,
     punctuated::Punctuated,
@@ -180,6 +180,7 @@ struct CudaModuleKernel {
     generics: syn::Generics,
     params: Vec<CudaModuleParam>,
     cluster_dim: Option<(u32, u32, u32)>,
+    cooperative: bool,
     is_generic: bool,
 }
 
@@ -214,6 +215,8 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
             "cuda_module found no #[kernel] functions in this module",
         ));
     }
+    let constants = collect_cuda_module_constants(items, ident)?;
+    let module_items = cuda_module_items_with_constant_symbols(items, &constants);
 
     let non_generic_kernels = kernels.iter().filter(|kernel| !kernel.is_generic);
     let function_fields = non_generic_kernels.clone().map(|kernel| {
@@ -235,7 +238,18 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
         }
     });
 
+    let artifact_anchor_statements = cuda_module_artifact_anchor_statements(&kernels)?;
+    let constant_fields = constants.iter().map(generate_cuda_module_constant_field);
+    let constant_initializers = constants
+        .iter()
+        .map(generate_cuda_module_constant_initializer);
     let launch_methods = kernels.iter().map(generate_cuda_module_launch_method);
+    let constant_resolver_methods = constants
+        .iter()
+        .map(generate_cuda_module_constant_resolver_method);
+    let set_constant_methods = constants
+        .iter()
+        .map(generate_cuda_module_set_constant_method);
     let async_module_items = if cfg!(feature = "async") {
         quote! {
             pub fn load_async(
@@ -270,9 +284,10 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
     Ok(quote! {
         #(#module_attrs)*
         #vis mod #ident {
-            #(#items)*
+            #(#module_items)*
 
             #[derive(Clone, Debug)]
+            #[allow(non_snake_case)]
             pub struct LoadedModule {
                 __module: ::std::sync::Arc<::cuda_core::CudaModule>,
                 __generic_functions: ::std::sync::Arc<
@@ -281,6 +296,7 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
                     >
                 >,
                 #(#function_fields)*
+                #(#constant_fields)*
             }
 
             pub fn load(
@@ -293,6 +309,7 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
                 ctx: &::std::sync::Arc<::cuda_core::CudaContext>,
                 name: &str,
             ) -> ::core::result::Result<LoadedModule, ::cuda_host::EmbeddedModuleError> {
+                #artifact_anchor_statements
                 let module = ::cuda_host::load_embedded_module(ctx, name)?;
                 from_module(module).map_err(::cuda_host::EmbeddedModuleError::Driver)
             }
@@ -306,6 +323,7 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
                         ::std::sync::Mutex::new(::std::collections::HashMap::new())
                     ),
                     #(#function_initializers)*
+                    #(#constant_initializers)*
                 })
             }
 
@@ -317,6 +335,8 @@ fn expand_cuda_module(module: ItemMod) -> syn::Result<TokenStream2> {
                 }
 
                 #(#launch_methods)*
+                #(#constant_resolver_methods)*
+                #(#set_constant_methods)*
                 #async_launch_methods
             }
         }
@@ -333,6 +353,7 @@ fn collect_cuda_module_kernels(items: &[Item]) -> syn::Result<Vec<CudaModuleKern
             continue;
         }
         let cluster_dim = cuda_module_cluster_dim(&item_fn.attrs)?;
+        let cooperative = cuda_module_cooperative(&item_fn.attrs)?;
         let params = cuda_module_params(item_fn)?;
         let is_generic = item_fn
             .sig
@@ -349,10 +370,361 @@ fn collect_cuda_module_kernels(items: &[Item]) -> syn::Result<Vec<CudaModuleKern
             generics: item_fn.sig.generics.clone(),
             params,
             cluster_dim,
+            cooperative,
             is_generic,
         });
     }
     Ok(kernels)
+}
+
+/// Generate the statements that pin this crate's embedded device artifact
+/// into the final binary.
+///
+/// The codegen backend stores each crate's compiled device code (PTX,
+/// cubin, NVVM IR, or LTOIR) in a `.oxart` data section of a small extra
+/// object file. When the crate that holds the `#[cuda_module]` is a
+/// *library*, that object becomes one member of the crate's `.rlib`
+/// archive, and linkers only extract an archive member when it defines a
+/// symbol that some already-linked object references. The backend defines
+/// a global anchor symbol inside the artifact object for exactly this
+/// purpose; here we emit the matching reference. Reading the anchor's
+/// address through `black_box` inside `load_named()` means that any
+/// program calling `load()` carries an undefined reference to the anchor,
+/// which forces the linker to pull the artifact member out of the rlib.
+/// Without this handshake the bundle was silently dropped and `load()`
+/// failed at runtime with `ModuleNotFound` (issue #72).
+///
+/// Both sides derive the symbol name from `CARGO_PKG_NAME` and
+/// `CARGO_PKG_VERSION`: this proc macro reads them while rustc compiles
+/// the crate, and the codegen backend reads them inside the same rustc
+/// process, so the names always agree under cargo.
+///
+/// The reference is only emitted when the module is guaranteed to produce
+/// an artifact for this crate. Generic kernels are monomorphized (and
+/// their PTX embedded) in the *consuming* crate, so a module with only
+/// generic kernels yields no artifact here, and an anchor reference would
+/// be an undefined-symbol link error. The same reasoning extends to
+/// `#[cfg]`-gated kernels: the anchor is guarded by the disjunction of
+/// the kernels' cfg conditions so it is only referenced when at least one
+/// concrete kernel is actually compiled.
+fn cuda_module_artifact_anchor_statements(
+    kernels: &[CudaModuleKernel],
+) -> syn::Result<TokenStream2> {
+    let (Ok(package_name), Ok(package_version)) = (
+        std::env::var("CARGO_PKG_NAME"),
+        std::env::var("CARGO_PKG_VERSION"),
+    ) else {
+        // Not built by cargo (e.g. a raw rustc invocation): the backend
+        // falls back to crate-name-based bundle naming and we cannot
+        // reproduce it exactly, so skip the anchor rather than risk an
+        // undefined symbol.
+        return Ok(TokenStream2::new());
+    };
+
+    let non_generic: Vec<&CudaModuleKernel> =
+        kernels.iter().filter(|kernel| !kernel.is_generic).collect();
+    if non_generic.is_empty() {
+        return Ok(TokenStream2::new());
+    }
+
+    let cfg_guard = if non_generic.iter().any(|kernel| kernel.cfg_attrs.is_empty()) {
+        // At least one concrete kernel is compiled unconditionally, so the
+        // artifact object always exists: no guard needed.
+        None
+    } else {
+        // Every concrete kernel is cfg-gated. Reference the anchor only
+        // when at least one of them is enabled. A kernel with several cfg
+        // attributes requires all of them, hence all(...) per kernel
+        // joined under any(...).
+        let alternatives = non_generic
+            .iter()
+            .map(|kernel| {
+                let predicates = kernel
+                    .cfg_attrs
+                    .iter()
+                    .map(|attr| attr.parse_args::<TokenStream2>())
+                    .collect::<syn::Result<Vec<_>>>()?;
+                Ok(quote! { all( #(#predicates),* ) })
+            })
+            .collect::<syn::Result<Vec<_>>>()?;
+        Some(quote! { #[cfg(any( #(#alternatives),* ))] })
+    };
+
+    let anchor = artifact_anchor_symbol(&package_name, &package_version);
+    let anchor_name = LitStr::new(&anchor, proc_macro2::Span::call_site());
+    Ok(quote! {
+        // Keep-alive handshake with the codegen backend: see the macro
+        // crate's `cuda_module_artifact_anchor_statements` for details.
+        #cfg_guard
+        let _artifact_anchor: *const ::core::primitive::u8 = {
+            unsafe extern "C" {
+                #[link_name = #anchor_name]
+                static CUDA_OXIDE_BUNDLE_ANCHOR: ::core::primitive::u8;
+            }
+            ::std::hint::black_box(unsafe {
+                ::core::ptr::addr_of!(CUDA_OXIDE_BUNDLE_ANCHOR)
+            })
+        };
+    })
+}
+
+/// A `#[constant]` static collected from a `#[cuda_module]` body.
+struct CudaModuleConstant {
+    ident: Ident,
+    ty: Box<Type>,
+    cfg_attrs: Vec<syn::Attribute>,
+    method_attrs: Vec<syn::Attribute>,
+    symbol: String,
+}
+
+fn collect_cuda_module_constants(
+    items: &[Item],
+    module_ident: &Ident,
+) -> syn::Result<Vec<CudaModuleConstant>> {
+    let mut constants = Vec::new();
+    for item in items {
+        let Item::Static(item_static) = item else {
+            continue;
+        };
+        if !has_attr_named(&item_static.attrs, "constant") {
+            continue;
+        }
+        if extract_constant_inner_ty(&item_static.ty).is_none() {
+            return Err(syn::Error::new_spanned(
+                &item_static.ty,
+                concat!(
+                    "#[constant] static must have type `ConstantMemory<T>` ",
+                    "(e.g. `static FOO: ConstantMemory<[f32; 4]> = ConstantMemory::UNINIT;`). ",
+                    "The wrapper prevents the compiler from constant-folding the initializer into kernel bodies.",
+                ),
+            ));
+        }
+        constants.push(CudaModuleConstant {
+            ident: item_static.ident.clone(),
+            ty: item_static.ty.clone(),
+            cfg_attrs: cuda_module_cfg_attrs(&item_static.attrs),
+            method_attrs: cuda_module_method_attrs(&item_static.attrs),
+            symbol: cuda_module_constant_symbol(module_ident, &item_static.ident),
+        });
+    }
+    Ok(constants)
+}
+
+fn cuda_module_constant_symbol(module_ident: &Ident, ident: &Ident) -> String {
+    let start = ident.span().start();
+    let base = format!(
+        "{}_L{}C{}_{}",
+        module_ident, start.line, start.column, ident
+    );
+    constant_symbol(&base)
+}
+
+fn cuda_module_items_with_constant_symbols(
+    items: &[Item],
+    constants: &[CudaModuleConstant],
+) -> Vec<TokenStream2> {
+    let mut constants = constants.iter();
+    items
+        .iter()
+        .map(|item| {
+            let Item::Static(item_static) = item else {
+                return quote! { #item };
+            };
+            if !has_attr_named(&item_static.attrs, "constant") {
+                return quote! { #item };
+            }
+            let constant = constants
+                .next()
+                .expect("constant collection and rewrite order drifted");
+
+            let mut item_static = item_static.clone();
+            let symbol = LitStr::new(&constant.symbol, constant.ident.span());
+            item_static.attrs = item_static
+                .attrs
+                .into_iter()
+                .map(|attr| {
+                    if attr_path_ends_with(&attr, "constant") {
+                        let path = attr.path().clone();
+                        parse_quote!(#[#path(export_name = #symbol)])
+                    } else {
+                        attr
+                    }
+                })
+                .collect();
+            quote! { #item_static }
+        })
+        .collect()
+}
+
+fn cuda_module_constant_field_ident(ident: &Ident) -> Ident {
+    format_ident!("__{}", ident)
+}
+
+fn cuda_module_constant_resolver_ident(ident: &Ident) -> Ident {
+    format_ident!("__resolve_{}", ident)
+}
+
+/// Extract `T` from a `ConstantMemory<T>` type path. Returns `None` for anything
+/// that's not a path ending in `ConstantMemory<...>` with one generic argument.
+fn extract_constant_inner_ty(ty: &Type) -> Option<&Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let last = type_path.path.segments.last()?;
+    if last.ident != "ConstantMemory" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    if args.args.len() != 1 {
+        return None;
+    }
+    args.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
+}
+
+/// Like [`extract_constant_inner_ty`] but for sites that have already been
+/// gated by `#[constant]`'s type-path validation, so extraction failure is
+/// a compiler-internal invariant violation, not a user error.
+fn constant_inner_ty(ty: &Type) -> &Type {
+    extract_constant_inner_ty(ty).unwrap_or_else(|| {
+        panic!(
+            "#[cuda_module] collected a #[constant] static whose type is not ConstantMemory<T>; \
+             this should have been rejected by the #[constant] attribute"
+        )
+    })
+}
+
+fn generate_cuda_module_constant_field(constant: &CudaModuleConstant) -> TokenStream2 {
+    let CudaModuleConstant {
+        ident, cfg_attrs, ..
+    } = constant;
+    let field = cuda_module_constant_field_ident(ident);
+    quote! {
+        #(#cfg_attrs)*
+        #field: ::std::sync::Arc<::std::sync::Mutex<::core::option::Option<::cuda_core::ConstantHandle>>>,
+    }
+}
+
+fn generate_cuda_module_constant_initializer(constant: &CudaModuleConstant) -> TokenStream2 {
+    let CudaModuleConstant {
+        ident, cfg_attrs, ..
+    } = constant;
+    let field = cuda_module_constant_field_ident(ident);
+    quote! {
+        #(#cfg_attrs)*
+        #field: ::std::sync::Arc::new(::std::sync::Mutex::new(::core::option::Option::None)),
+    }
+}
+
+fn generate_cuda_module_constant_resolver_method(constant: &CudaModuleConstant) -> TokenStream2 {
+    let CudaModuleConstant {
+        ident,
+        ty,
+        cfg_attrs,
+        symbol,
+        ..
+    } = constant;
+    let field = cuda_module_constant_field_ident(ident);
+    let resolver = cuda_module_constant_resolver_ident(ident);
+    let symbol_lit = LitStr::new(symbol, ident.span());
+    let inner_ty = constant_inner_ty(ty);
+    let mismatch_msg = format!(
+        "host/device size mismatch for #[constant] static `{ident}`: \
+         device size {{}} bytes, host expected {{}} bytes (PTX symbol `{symbol}`)"
+    );
+    quote! {
+        #(#cfg_attrs)*
+        #[allow(non_snake_case)]
+        fn #resolver(&self) -> ::core::result::Result<::cuda_core::ConstantHandle, ::cuda_core::DriverError> {
+            let mut slot = self
+                .#field
+                .lock()
+                .expect("cuda constant handle cache mutex poisoned");
+            if let ::core::option::Option::Some(handle) = *slot {
+                return ::core::result::Result::Ok(handle);
+            }
+
+            let (dptr, size) = self.__module.get_global(#symbol_lit)?;
+            assert_eq!(
+                size,
+                ::core::mem::size_of::<#inner_ty>(),
+                #mismatch_msg,
+                size,
+                ::core::mem::size_of::<#inner_ty>(),
+            );
+            // SAFETY: `dptr` was just resolved by `cuModuleGetGlobal` for a
+            // module that the LoadedModule keeps alive, and the size matches
+            // `size_of::<#inner_ty>()` (asserted above).
+            let handle = unsafe { ::cuda_core::ConstantHandle::from_raw(dptr) };
+            *slot = ::core::option::Option::Some(handle);
+            ::core::result::Result::Ok(handle)
+        }
+    }
+}
+
+/// Generate stream-ordered `set_<name>` and one-shot `set_<name>_blocking`
+/// methods on `LoadedModule`. The async setter stages owned host bytes so
+/// temporaries remain valid until CUDA reaches the stream callback.
+fn generate_cuda_module_set_constant_method(constant: &CudaModuleConstant) -> TokenStream2 {
+    let CudaModuleConstant {
+        ident,
+        ty,
+        cfg_attrs,
+        method_attrs,
+        ..
+    } = constant;
+    let method_suffix = ident.to_string().to_ascii_lowercase();
+    let method_name = format_ident!("set_{}", method_suffix);
+    let blocking_name = format_ident!("set_{}_blocking", method_suffix);
+    let resolver = cuda_module_constant_resolver_ident(ident);
+    let inner_ty = constant_inner_ty(ty);
+
+    quote! {
+        #(#cfg_attrs)*
+        #(#method_attrs)*
+        #[allow(non_snake_case)]
+        pub fn #method_name(
+            &self,
+            stream: &::cuda_core::CudaStream,
+            value: &#inner_ty,
+        ) -> ::core::result::Result<(), ::cuda_core::DriverError> {
+            let handle = self.#resolver()?;
+            let num_bytes = ::core::mem::size_of::<#inner_ty>();
+            let mut bytes = ::std::boxed::Box::<[u8]>::new_uninit_slice(num_bytes);
+            unsafe {
+                ::core::ptr::copy_nonoverlapping(
+                    value as *const #inner_ty as *const u8,
+                    bytes.as_mut_ptr() as *mut u8,
+                    num_bytes,
+                );
+            }
+            handle.write_async_staged(stream, bytes)
+        }
+
+        #(#cfg_attrs)*
+        #(#method_attrs)*
+        #[allow(non_snake_case)]
+        pub fn #blocking_name(
+            &self,
+            value: &#inner_ty,
+        ) -> ::core::result::Result<(), ::cuda_core::DriverError> {
+            let handle = self.#resolver()?;
+            // SAFETY: handle was size-checked against `#inner_ty` by the lazy
+            // resolver; `value` is a valid host pointer for
+            // `size_of::<#inner_ty>()`.
+            unsafe {
+                handle.write_blocking(
+                    &self.__module,
+                    value as *const #inner_ty as *const u8,
+                    ::core::mem::size_of::<#inner_ty>(),
+                )
+            }
+        }
+    }
 }
 
 fn cuda_module_method_attrs(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
@@ -391,6 +763,21 @@ fn cuda_module_cluster_dim(attrs: &[syn::Attribute]) -> syn::Result<Option<(u32,
         }
     }
     Ok(None)
+}
+
+fn cuda_module_cooperative(attrs: &[syn::Attribute]) -> syn::Result<bool> {
+    for attr in attrs {
+        if attr_path_ends_with(attr, "cooperative_launch") {
+            if !matches!(attr.meta, syn::Meta::Path(_)) {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "cooperative_launch takes no arguments: use a bare #[cooperative_launch]",
+                ));
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn cuda_module_params(item_fn: &ItemFn) -> syn::Result<Vec<CudaModuleParam>> {
@@ -569,6 +956,11 @@ fn generate_cuda_module_async_launch_method(kernel: &CudaModuleKernel) -> TokenS
             ::cuda_host::set_async_kernel_cluster_dim(&mut __launch, #cluster_dim);
         }
     });
+    let set_cooperative = kernel.cooperative.then(|| {
+        quote! {
+            ::cuda_host::set_async_kernel_cooperative(&mut __launch, true);
+        }
+    });
 
     quote! {
         #(#cfg_attrs)*
@@ -584,6 +976,7 @@ fn generate_cuda_module_async_launch_method(kernel: &CudaModuleKernel) -> TokenS
             #function_binding
             let mut __launch = ::cuda_host::new_async_kernel_launch(__func.clone(), config);
             #set_cluster_dim
+            #set_cooperative
             #(#arg_marshalling)*
             Ok(__launch)
         }
@@ -627,6 +1020,11 @@ fn generate_cuda_module_owned_async_launch_method(kernel: &CudaModuleKernel) -> 
             ::cuda_host::set_async_kernel_cluster_dim(&mut __launch, #cluster_dim);
         }
     });
+    let set_cooperative = kernel.cooperative.then(|| {
+        quote! {
+            ::cuda_host::set_async_kernel_cooperative(&mut __launch, true);
+        }
+    });
     let resources_ty = cuda_module_owned_resources_ty(&resources);
     let resource_names = resources.iter().map(|(_, name, _, _)| name);
     let resources_expr = if resources.is_empty() {
@@ -650,6 +1048,7 @@ fn generate_cuda_module_owned_async_launch_method(kernel: &CudaModuleKernel) -> 
             let mut __launch: ::cuda_host::AsyncKernelLaunch<'static> =
                 ::cuda_host::new_async_kernel_launch(__func.clone(), config);
             #set_cluster_dim
+            #set_cooperative
             #(#arg_marshalling)*
             Ok(::cuda_host::new_owned_async_kernel_launch(__launch, #resources_expr))
         }
@@ -884,8 +1283,21 @@ fn cuda_module_function_binding(kernel: &CudaModuleKernel) -> TokenStream2 {
 
 fn cuda_module_launch_call(kernel: &CudaModuleKernel) -> TokenStream2 {
     let cluster_dim = kernel.cluster_dim.map(|(x, y, z)| quote! { (#x, #y, #z) });
-    if let Some(cluster_dim) = cluster_dim {
-        quote! {
+    match (cluster_dim, kernel.cooperative) {
+        (Some(cluster_dim), true) => quote! {
+            unsafe {
+                ::cuda_core::launch_kernel_ex_cooperative_on_stream(
+                    __func,
+                    config.grid_dim,
+                    config.block_dim,
+                    config.shared_mem_bytes,
+                    #cluster_dim,
+                    stream,
+                    &mut __args,
+                )
+            }
+        },
+        (Some(cluster_dim), false) => quote! {
             unsafe {
                 ::cuda_core::launch_kernel_ex_on_stream(
                     __func,
@@ -897,9 +1309,20 @@ fn cuda_module_launch_call(kernel: &CudaModuleKernel) -> TokenStream2 {
                     &mut __args,
                 )
             }
-        }
-    } else {
-        quote! {
+        },
+        (None, true) => quote! {
+            unsafe {
+                ::cuda_core::launch_kernel_cooperative_on_stream(
+                    __func,
+                    config.grid_dim,
+                    config.block_dim,
+                    config.shared_mem_bytes,
+                    stream,
+                    &mut __args,
+                )
+            }
+        },
+        (None, false) => quote! {
             unsafe {
                 ::cuda_core::launch_kernel_on_stream(
                     __func,
@@ -910,7 +1333,7 @@ fn cuda_module_launch_call(kernel: &CudaModuleKernel) -> TokenStream2 {
                     &mut __args,
                 )
             }
-        }
+        },
     }
 }
 
@@ -1005,6 +1428,123 @@ pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
         // Simple non-generic kernel
         generate_simple_kernel(input)
     }
+}
+
+struct ConstantArgs {
+    export_name: Option<LitStr>,
+}
+
+impl Parse for ConstantArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.is_empty() {
+            return Ok(Self { export_name: None });
+        }
+
+        let key: Ident = input.parse()?;
+        if key != "export_name" {
+            return Err(syn::Error::new_spanned(
+                key,
+                "#[constant] does not take public arguments",
+            ));
+        }
+        input.parse::<Token![=]>()?;
+        let export_name = input.parse()?;
+        if !input.is_empty() {
+            input.parse::<Token![,]>()?;
+            if !input.is_empty() {
+                return Err(input.error("unexpected tokens after #[constant] export_name"));
+            }
+        }
+        Ok(Self {
+            export_name: Some(export_name),
+        })
+    }
+}
+
+/// Mark a module-scope `static` as a CUDA constant-memory global.
+///
+/// The static must be typed `ConstantMemory<T>` (see
+/// [`cuda_device::ConstantMemory`](../../cuda_device/struct.ConstantMemory.html)). The
+/// `ConstantMemory<T>` wrapper has `UnsafeCell<T>` semantics on the device,
+/// preventing the compiler from constant-folding the initializer and making
+/// the host's `cuMemcpyHtoD` updates observable from kernels.
+///
+/// The macro adds a reserved `#[unsafe(export_name = "cuda_oxide_const_246e25db_...")]`
+/// so the PTX symbol carries a name the host can resolve via
+/// `cuModuleGetGlobal`. When used inside `#[cuda_module]`, the generated name
+/// includes module/source-location context to avoid collisions between constants
+/// that share the same Rust identifier. The host-side `#[cuda_module]` expansion
+/// separately generates per-constant setter methods on the loaded module:
+///
+/// - `module.set_<name>(&stream, &value)` — stream-ordered async write
+///   (recommended; orders correctly against surrounding kernel launches).
+/// - `module.set_<name>_blocking(&value)` — synchronous `cuMemcpyHtoD`
+///   for one-shot initialization where no stream is in scope.
+///
+/// # Restrictions
+///
+/// - The static must be typed `ConstantMemory<T>`.
+/// - The initializer must be `ConstantMemory::UNINIT` (or any other all-zeros
+///   value). Honoring arbitrary non-zero initializers is not yet
+///   implemented; populate from the host before any kernel reads the value.
+/// - The attribute must appear inside a `#[cuda_module]`. Placed elsewhere
+///   it silently produces an unreachable symbol (no setter is generated).
+/// - The identifier must not start with the reserved cuda-oxide prefix.
+///
+/// # Example
+///
+/// ```ignore
+/// #[cuda_module]
+/// mod kernels {
+///     #[constant]
+///     static COEFFS: ConstantMemory<[f32; 4]> = ConstantMemory::UNINIT;
+///
+///     #[kernel]
+///     pub fn compute(mut out: DisjointSlice<f32>) {
+///         let c = COEFFS.get();
+///         let i = thread::index_1d().get();
+///         if let Some(e) = out.get_mut(thread::index_1d()) {
+///             *e = c[0] * (i as f32) + c[1];
+///         }
+///     }
+/// }
+///
+/// // Host
+/// module.set_coeffs(&stream, &[1.0, 2.0, 3.0, 4.0])?;
+/// ```
+#[proc_macro_attribute]
+pub fn constant(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as ConstantArgs);
+    let input = parse_macro_input!(item as syn::ItemStatic);
+
+    if let Some(err) = reject_reserved_name(&input.ident) {
+        return err;
+    }
+
+    if extract_constant_inner_ty(&input.ty).is_none() {
+        return syn::Error::new_spanned(
+            &input.ty,
+            "#[constant] static must have type `ConstantMemory<T>` \
+             (e.g. `static FOO: ConstantMemory<[f32; 4]> = ConstantMemory::UNINIT;`). \
+             The wrapper prevents the compiler from constant-folding the \
+             initializer into kernel bodies.",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let export_name = args.export_name.unwrap_or_else(|| {
+        LitStr::new(
+            &constant_symbol(&input.ident.to_string()),
+            input.ident.span(),
+        )
+    });
+
+    quote! {
+        #[unsafe(export_name = #export_name)]
+        #input
+    }
+    .into()
 }
 
 /// Find the generic type parameter that has a Fn/FnMut/FnOnce bound (the closure type).
@@ -1940,6 +2480,70 @@ impl Parse for ClusterArgs {
     }
 }
 
+/// Marks a kernel for cooperative launch (`CU_LAUNCH_ATTRIBUTE_COOPERATIVE`).
+///
+/// A cooperative launch guarantees that every block in the grid is
+/// co-resident on the device, which is the precondition for grid-wide
+/// barriers: without it, `cuda_device::grid::sync()` deadlocks (or reads a
+/// null grid-workspace pointer) because blocks that have not been scheduled
+/// yet can never reach the barrier.
+///
+/// Unlike `#[cluster_launch]`, this attribute changes nothing in the
+/// generated PTX. Cooperative-ness is purely a launch-time property: the
+/// `#[cuda_module]` macro reads this marker and routes every generated
+/// launch method through `cuLaunchKernelEx` with the cooperative attribute
+/// set, instead of plain `cuLaunchKernel`.
+///
+/// # Usage
+///
+/// ```ignore
+/// use cuda_device::{cooperative_launch, grid, kernel, DisjointSlice};
+///
+/// #[kernel]
+/// #[cooperative_launch]
+/// pub fn my_grid_sync_kernel(mut out: DisjointSlice<u32>) {
+///     // ... per-block work ...
+///     grid::sync();
+///     // ... grid-wide post-barrier work ...
+/// }
+/// ```
+///
+/// # Requirements
+///
+/// - Must be used WITH `#[kernel]` (not standalone), on a kernel inside a
+///   `#[cuda_module]` module
+/// - The `#[cooperative_launch]` attribute must come AFTER `#[kernel]`
+/// - The device must support cooperative launch
+///   (`CU_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH`)
+/// - The grid must fit on the device in one wave, otherwise the driver
+///   rejects the launch with `CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE`
+///
+/// May be combined with `#[cluster_launch(x, y, z)]`; both launch
+/// attributes are then passed to `cuLaunchKernelEx` in the same call.
+///
+/// Outside `#[cuda_module]`, the legacy (caller-unsafe) `cuda_launch!`
+/// macro offers the same behaviour through its `cooperative: true` field.
+#[proc_macro_attribute]
+pub fn cooperative_launch(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "cooperative_launch takes no arguments: use a bare #[cooperative_launch]",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // Launch-time only: the marker is consumed by #[cuda_module]; the kernel
+    // body and PTX are unchanged. Parse as a function so misuse on other
+    // items is rejected with a clear error.
+    let input = parse_macro_input!(item as ItemFn);
+    quote! {
+        #input
+    }
+    .into()
+}
+
 /// Marks a function as a CUDA device function.
 ///
 /// Device functions run on the GPU and can be called from kernels or other device functions,
@@ -2514,21 +3118,52 @@ impl Parse for CudaLaunchInput {
     }
 }
 
-/// Launch a CUDA kernel synchronously on a given stream.
+/// Launch a CUDA kernel synchronously on a given stream. **Unsafe**: the
+/// expansion calls the unsafe `cuda_core` launch functions without wrapping
+/// them, so every use must appear inside an `unsafe { }` block.
 ///
 /// Uses the `CudaKernel` trait (generated by `#[kernel]`) to look up the PTX
 /// entry point name. Arguments are marshaled into a `Vec<*mut c_void>` and
 /// passed directly to `cuda_core::launch_kernel` (`cuLaunchKernel`).
 ///
+/// # Safety
+///
+/// This macro cannot check the kernel's signature. It hands the driver a raw
+/// array of argument pointers and trusts you completely. By wrapping the
+/// macro in `unsafe { }`, the caller promises:
+///
+/// - the argument **count and order** match the kernel's actual parameter
+///   list (with each `slice(..)` / `slice_mut(..)` counting as two
+///   parameters: pointer then length);
+/// - each argument's **type, size, and alignment** match the corresponding
+///   kernel parameter;
+/// - every pointer argument is **device-accessible** (a valid device
+///   allocation, or host memory reachable via HMM/unified memory) and stays
+///   alive until the kernel finishes.
+///
+/// A mismatch is undefined behavior, not a runtime error: too few or
+/// mistyped arguments make the driver read past the end of the args array,
+/// and a bad pointer makes the device dereference junk.
+///
+/// For kernels embedded in your own crate, prefer `#[cuda_module]`: it
+/// reads the kernel signatures at compile time and generates typed launch
+/// methods, so none of the above can go wrong. This macro's remaining niche
+/// is modules loaded at **runtime by name** (e.g. external PTX files),
+/// where no compile-time signature exists to check.
+///
 /// # Usage
 ///
 /// ```ignore
-/// cuda_launch! {
-///     kernel: vecadd,
-///     stream: stream,
-///     module: module,
-///     config: LaunchConfig::for_num_elems(n as u32),
-///     args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
+/// // SAFETY: argument count, order, and types match `vecadd`'s signature;
+/// // a_dev, b_dev, c_dev are live device buffers.
+/// unsafe {
+///     cuda_launch! {
+///         kernel: vecadd,
+///         stream: stream,
+///         module: module,
+///         config: LaunchConfig::for_num_elems(n as u32),
+///         args: [slice(a_dev), slice(b_dev), slice_mut(c_dev)]
+///     }
 /// }
 /// ```
 ///
@@ -2751,20 +3386,19 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
                 let mut __args: Vec<*mut std::ffi::c_void> = Vec::new();
                 #(#arg_code)*
 
-                unsafe {
-                    #launch_call
-                }
+                #launch_call
             }
         }
     } else if input.is_generic() {
         quote! {
             {
                 let __kernel_ptr = #kernel_entry #generics as *const ();
-                unsafe {
-                    let mut __force_mono: *const () = core::ptr::null();
-                    core::ptr::write_volatile(&mut __force_mono, __kernel_ptr);
-                    let _ = core::ptr::read_volatile(&__force_mono);
-                }
+                // Caller-unsafe on purpose: the volatile write/read pair that
+                // forces monomorphization is covered by the same `unsafe { }`
+                // block the caller must already supply for the launch itself.
+                let mut __force_mono: *const () = core::ptr::null();
+                core::ptr::write_volatile(&mut __force_mono, __kernel_ptr);
+                let _ = core::ptr::read_volatile(&__force_mono);
 
                 let __ptx_name = <#marker_name #generics as cuda_host::GenericCudaKernel>::ptx_name();
                 let __func = #module.load_function(__ptx_name).unwrap_or_else(|err| {
@@ -2779,9 +3413,7 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
                 let mut __args: Vec<*mut std::ffi::c_void> = Vec::new();
                 #(#arg_code)*
 
-                unsafe {
-                    #launch_call
-                }
+                #launch_call
             }
         }
     } else {
@@ -2800,9 +3432,7 @@ pub fn cuda_launch(input: TokenStream) -> TokenStream {
                 let mut __args: Vec<*mut std::ffi::c_void> = Vec::new();
                 #(#arg_code)*
 
-                unsafe {
-                    #launch_call
-                }
+                #launch_call
             }
         }
     };
@@ -2908,10 +3538,10 @@ impl Parse for CudaLaunchAsyncInput {
     }
 }
 
-/// Launch a CUDA kernel asynchronously, returning a lazy [`AsyncKernelLaunch`].
+/// Launch a CUDA kernel asynchronously, returning a lazy `AsyncKernelLaunch`.
 ///
 /// Unlike [`cuda_launch!`], this macro does **not** take a `stream:` parameter. The
-/// CUDA stream is assigned later by the active [`SchedulingPolicy`] when the returned
+/// CUDA stream is assigned later by the active `SchedulingPolicy` when the returned
 /// operation is `.sync()`'d or `.await`'d. This enables lazy composition: multiple
 /// launches can be chained with `.and_then()`, run in parallel with `zip!()`, or
 /// awaited individually.
@@ -2934,7 +3564,7 @@ impl Parse for CudaLaunchAsyncInput {
 ///
 /// # Returns
 ///
-/// An [`AsyncKernelLaunch`] implementing [`DeviceOperation`]. No GPU work is enqueued
+/// An `AsyncKernelLaunch` implementing `DeviceOperation`. No GPU work is enqueued
 /// until the caller schedules it.
 ///
 /// # Usage
@@ -3099,4 +3729,127 @@ pub fn cuda_launch_async(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Expands a `#[cuda_module]` body and returns the generated tokens as a
+    /// whitespace-free string, so tests can assert on call paths without
+    /// caring how `quote!` spaces out `::` separators.
+    fn expand_to_compact_string(module: ItemMod) -> String {
+        expand_cuda_module(module)
+            .expect("cuda_module expansion failed")
+            .to_string()
+            .replace(' ', "")
+    }
+
+    #[test]
+    fn cooperative_kernel_launches_through_cooperative_driver_call() {
+        let module: ItemMod = parse_quote! {
+            mod kernels {
+                #[kernel]
+                #[cooperative_launch]
+                pub fn grid_sync_kernel(mut out: DisjointSlice<u32>) {}
+            }
+        };
+        let expanded = expand_to_compact_string(module);
+
+        // The sync launch method must route through the cooperative driver
+        // entry point (cuLaunchKernelEx + CU_LAUNCH_ATTRIBUTE_COOPERATIVE)
+        // instead of plain cuLaunchKernel.
+        assert!(
+            expanded.contains("launch_kernel_cooperative_on_stream"),
+            "expected cooperative launch call in generated tokens:\n{expanded}"
+        );
+        assert!(
+            !expanded.contains("launch_kernel_on_stream"),
+            "plain launch call should be replaced by the cooperative one:\n{expanded}"
+        );
+    }
+
+    #[test]
+    fn plain_kernel_keeps_plain_driver_call() {
+        let module: ItemMod = parse_quote! {
+            mod kernels {
+                #[kernel]
+                pub fn plain_kernel(mut out: DisjointSlice<u32>) {}
+            }
+        };
+        let expanded = expand_to_compact_string(module);
+
+        assert!(
+            expanded.contains("launch_kernel_on_stream"),
+            "expected plain launch call in generated tokens:\n{expanded}"
+        );
+        assert!(
+            !expanded.contains("launch_kernel_cooperative_on_stream"),
+            "cooperative call must not appear without #[cooperative_launch]:\n{expanded}"
+        );
+    }
+
+    #[test]
+    fn cooperative_plus_cluster_kernel_uses_combined_driver_call() {
+        let module: ItemMod = parse_quote! {
+            mod kernels {
+                #[kernel]
+                #[cluster_launch(2, 1, 1)]
+                #[cooperative_launch]
+                pub fn clustered_grid_sync_kernel(mut out: DisjointSlice<u32>) {}
+            }
+        };
+        let expanded = expand_to_compact_string(module);
+
+        // cuLaunchKernelEx accepts both attributes in one attrs array, so the
+        // combination is allowed and routes through the combined helper.
+        assert!(
+            expanded.contains("launch_kernel_ex_cooperative_on_stream"),
+            "expected combined cluster+cooperative launch call:\n{expanded}"
+        );
+        assert!(
+            !expanded.contains("launch_kernel_ex_on_stream"),
+            "cluster-only call should be replaced by the combined one:\n{expanded}"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn cooperative_kernel_sets_async_builder_knob() {
+        let module: ItemMod = parse_quote! {
+            mod kernels {
+                #[kernel]
+                #[cooperative_launch]
+                pub fn grid_sync_kernel(mut out: DisjointSlice<u32>) {}
+            }
+        };
+        let expanded = expand_to_compact_string(module);
+
+        // Both the borrowed-async and owned-async builder methods set the
+        // cooperative knob, exactly like set_async_kernel_cluster_dim is set
+        // for #[cluster_launch].
+        assert_eq!(
+            expanded.matches("set_async_kernel_cooperative").count(),
+            2,
+            "expected the cooperative knob in both async builder methods:\n{expanded}"
+        );
+    }
+
+    #[test]
+    fn cooperative_launch_with_arguments_is_rejected() {
+        let module: ItemMod = parse_quote! {
+            mod kernels {
+                #[kernel]
+                #[cooperative_launch(4)]
+                pub fn grid_sync_kernel(mut out: DisjointSlice<u32>) {}
+            }
+        };
+        let error = expand_cuda_module(module).expect_err("expected expansion to fail");
+        assert!(
+            error
+                .to_string()
+                .contains("cooperative_launch takes no arguments"),
+            "unexpected error message: {error}"
+        );
+    }
 }

@@ -10,8 +10,10 @@ Replaces the previous `xtask` pattern with a proper cargo subcommand that works 
 
 **External users**:
 
+Install with the project's pinned nightly toolchain:
+
 ```bash
-cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
+cargo +nightly-2026-04-03 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
 ```
 
 On first run, `cargo-oxide` will automatically fetch and build the codegen backend if it's not already available.
@@ -24,7 +26,7 @@ cargo oxide new my_project --async  # scaffold with async template (tokio + cuda
 cargo oxide run vecadd              # build + run an example
 cargo oxide build vecadd            # compile only (no run)
 cargo oxide pipeline vecadd         # verbose pipeline dump
-                                    # (MIR -> dialect-mir -> dialect-llvm -> LLVM IR -> PTX)
+                                    # (MIR -> dialect-mir -> LLVM dialect -> LLVM IR -> PTX)
 cargo oxide debug vecadd --tui      # build + launch cuda-gdb
 cargo oxide fmt                     # format all crates
 cargo oxide fmt --check             # check formatting
@@ -61,7 +63,17 @@ cross-target workflow.
 cargo oxide run vecadd
 cargo oxide run gemm_sol
 cargo oxide run device_ffi_test --emit-nvvm-ir --arch sm_120
+cargo oxide run cutile_inter_kernel
 ```
+
+Interop examples can declare extra cuda-oxide device crates with
+`[[package.metadata.cuda-oxide.device-crates]]`, plus optional
+`[package.metadata.cuda-oxide.interop]` metadata. `cargo oxide run` builds those
+device crates with `rustc-codegen-cuda`, writes their PTX to the
+configured location, and then builds/runs the host crate normally.
+`cutile_inter_kernel` uses this path:
+the host crate is a cutile-rs program, while `simt/` is a cuda-oxide SIMT PTX
+crate loaded by the host at runtime.
 
 ### `cargo oxide build <example>`
 
@@ -74,7 +86,7 @@ cargo oxide build tcgen05        # sm_100a only, but PTX generation works anywhe
 
 ### `cargo oxide pipeline <example>`
 
-Shows the full compilation pipeline with verbose output at every stage: MIR collection, `dialect-mir` (alloca + post-`mem2reg`), `dialect-llvm`, textual LLVM IR, and the final PTX.
+Shows the full compilation pipeline with verbose output at every stage: MIR collection, `dialect-mir` (alloca + post-`mem2reg`), the LLVM dialect, textual LLVM IR, and the final PTX.
 
 ```bash
 cargo oxide pipeline vecadd

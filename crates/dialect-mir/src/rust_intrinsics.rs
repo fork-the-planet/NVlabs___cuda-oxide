@@ -45,6 +45,11 @@ pub const CALLEE_SATURATING_ADD: &str = placeholder!("saturating_add");
 /// Placeholder call used for `core::intrinsics::saturating_sub`.
 pub const CALLEE_SATURATING_SUB: &str = placeholder!("saturating_sub");
 
+/// Placeholder call used for `core::intrinsics::carrying_mul_add`.
+/// Backs the bigint helper methods `carrying_mul_add`, `carrying_mul`,
+/// and `widening_mul` on integer types.
+pub const CALLEE_CARRYING_MUL_ADD: &str = placeholder!("carrying_mul_add");
+
 /// Placeholder call used for `core::intrinsics::sqrtf32`.
 pub const CALLEE_SQRT_F32: &str = placeholder!("sqrtf32");
 /// Placeholder call used for `core::intrinsics::sqrtf64`.
@@ -123,3 +128,23 @@ pub const CALLEE_FABS: &str = placeholder!("fabs");
 pub const CALLEE_COPYSIGN_F32: &str = placeholder!("copysignf32");
 /// Placeholder call used for `core::intrinsics::copysignf64`.
 pub const CALLEE_COPYSIGN_F64: &str = placeholder!("copysignf64");
+/// Placeholder call used for `core::intrinsics::maximum_number_nsz_f32`
+/// (the intrinsic backing `f32::max`).
+pub const CALLEE_MAXNUM_NSZ_F32: &str = placeholder!("maximum_number_nsz_f32");
+/// Placeholder call used for `core::intrinsics::maximum_number_nsz_f64`
+/// (the intrinsic backing `f64::max`).
+pub const CALLEE_MAXNUM_NSZ_F64: &str = placeholder!("maximum_number_nsz_f64");
+/// Placeholder call used for `core::intrinsics::minimum_number_nsz_f32`
+/// (the intrinsic backing `f32::min`).
+pub const CALLEE_MINNUM_NSZ_F32: &str = placeholder!("minimum_number_nsz_f32");
+/// Placeholder call used for `core::intrinsics::minimum_number_nsz_f64`
+/// (the intrinsic backing `f64::min`).
+pub const CALLEE_MINNUM_NSZ_F64: &str = placeholder!("minimum_number_nsz_f64");
+/// Placeholder call used for `f32::atan2` / `std::sys::cmath::atan2f`.
+pub const CALLEE_ATAN2_F32: &str = placeholder!("atan2f32");
+/// Placeholder call used for `f64::atan2` / `std::sys::cmath::atan2`.
+pub const CALLEE_ATAN2_F64: &str = placeholder!("atan2f64");
+/// Placeholder call used for `f32::atan` / `std::sys::cmath::atanf`.
+pub const CALLEE_ATAN_F32: &str = placeholder!("atanf32");
+/// Placeholder call used for `f64::atan` / `std::sys::cmath::atan`.
+pub const CALLEE_ATAN_F64: &str = placeholder!("atanf64");
