@@ -26,12 +26,13 @@ use crate::conversion_interface::MirToLlvmConversion;
 use dialect_mir::ops::{
     MirAddOp, MirAllocaOp, MirArrayElementAddrOp, MirAssertOp, MirBitAndOp, MirBitOrOp,
     MirBitXorOp, MirCallOp, MirCastOp, MirCheckedAddOp, MirCheckedMulOp, MirCheckedSubOp, MirCmpOp,
-    MirCondBranchOp, MirConstantOp, MirConstructArrayOp, MirConstructEnumOp, MirConstructStructOp,
-    MirConstructTupleOp, MirDivOp, MirEnumPayloadOp, MirEqOp, MirExtractArrayElementOp,
-    MirExtractFieldOp, MirFieldAddrOp, MirFloatConstantOp, MirGeOp, MirGetDiscriminantOp,
-    MirGotoOp, MirGtOp, MirInsertFieldOp, MirLeOp, MirLoadOp, MirLtOp, MirMulOp, MirNeOp, MirNegOp,
-    MirNotOp, MirPtrOffsetOp, MirRefOp, MirRemOp, MirReturnOp, MirShlOp, MirShrOp,
-    MirStorageDeadOp, MirStorageLiveOp, MirStoreOp, MirSubOp, MirUndefOp, MirUnreachableOp,
+    MirCondBranchOp, MirConstantOp, MirConstructArrayOp, MirConstructEnumOp, MirConstructSliceOp,
+    MirConstructStructOp, MirConstructTupleOp, MirDivOp, MirEnumPayloadOp, MirEqOp,
+    MirExtractArrayElementOp, MirExtractFieldOp, MirFieldAddrOp, MirFloatConstantOp, MirGeOp,
+    MirGetDiscriminantOp, MirGotoOp, MirGtOp, MirInsertFieldOp, MirLeOp, MirLoadOp, MirLtOp,
+    MirMulOp, MirNeOp, MirNegOp, MirNotOp, MirPtrOffsetOp, MirRefOp, MirRemOp, MirReturnOp,
+    MirShlOp, MirShrOp, MirStorageDeadOp, MirStorageLiveOp, MirStoreOp, MirSubOp, MirUndefOp,
+    MirUnreachableOp,
 };
 use dialect_nvvm::ops::{
     ActiveMaskOp, BarWarpSyncOp, Barrier0Op, BreakpointOp, ClcQueryGetFirstCtaidXOp,
@@ -580,6 +581,23 @@ impl MirToLlvmConversion for MirConstructTupleOp {
         operands_info: &OperandsInfo,
     ) -> Result<()> {
         super::ops::aggregate::convert_construct_tuple(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for MirConstructSliceOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::ops::aggregate::convert_construct_slice(
             ctx,
             rewriter,
             self.get_operation(),

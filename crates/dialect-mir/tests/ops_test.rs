@@ -7,11 +7,12 @@ use dialect_mir::{
     attributes::MirCastKindAttr,
     ops::{
         MirAddOp, MirAssertOp, MirAssignOp, MirCallOp, MirCastOp, MirCheckedAddOp, MirCmpOp,
-        MirCondBranchOp, MirConstantOp, MirDivOp, MirEqOp, MirExtractFieldOp, MirFuncOp, MirGeOp,
-        MirGlobalAllocOp, MirGotoOp, MirGtOp, MirLeOp, MirLoadOp, MirLtOp, MirMulOp, MirNeOp,
-        MirNegOp, MirNotOp, MirPtrOffsetOp, MirRemOp, MirReturnOp, MirStoreOp, MirSubOp,
+        MirCondBranchOp, MirConstantOp, MirConstructSliceOp, MirDivOp, MirEqOp, MirExtractFieldOp,
+        MirFuncOp, MirGeOp, MirGlobalAllocOp, MirGotoOp, MirGtOp, MirLeOp, MirLoadOp, MirLtOp,
+        MirMulOp, MirNeOp, MirNegOp, MirNotOp, MirPtrOffsetOp, MirRemOp, MirReturnOp, MirStoreOp,
+        MirSubOp,
     },
-    types::{EnumVariant, MirEnumType, MirPtrType, MirTupleType},
+    types::{EnumVariant, MirEnumType, MirPtrType, MirSliceType, MirTupleType},
 };
 use pliron::{
     basic_block::BasicBlock,
@@ -325,6 +326,79 @@ fn test_mir_extract_field_verify() {
     let extract_op_oob = MirExtractFieldOp::new(op_oob);
     extract_op_oob.set_attr_index(&ctx, dialect_mir::attributes::FieldIndexAttr(2));
     assert!(extract_op_oob.verify(&ctx).is_err(), "OOB Index");
+}
+
+#[test]
+fn test_mir_construct_slice_verify() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+
+    let u8_ty = IntegerType::get(&mut ctx, 8, Signedness::Unsigned);
+    let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signed);
+    let usize_ty = IntegerType::get(&mut ctx, 64, Signedness::Unsigned);
+    let u8_ptr_ty = MirPtrType::get_generic(&mut ctx, u8_ty.into(), false);
+    let u8_slice_ty = MirSliceType::get(&mut ctx, u8_ty.into());
+    let i32_slice_ty = MirSliceType::get(&mut ctx, i32_ty.into());
+
+    let block = BasicBlock::new(&mut ctx, None, vec![u8_ptr_ty.into(), usize_ty.into()]);
+    let ptr_val = block.deref(&ctx).get_argument(0);
+    let len_val = block.deref(&ctx).get_argument(1);
+
+    // Valid: (ptr to u8, usize len) -> slice of u8
+    let op = Operation::new(
+        &mut ctx,
+        MirConstructSliceOp::get_concrete_op_info(),
+        vec![u8_slice_ty.into()],
+        vec![ptr_val, len_val],
+        vec![],
+        0,
+    );
+    assert!(
+        MirConstructSliceOp::new(op).verify(&ctx).is_ok(),
+        "Valid slice construction"
+    );
+
+    // Invalid: data pointer pointee does not match slice element type
+    let op_bad_elem = Operation::new(
+        &mut ctx,
+        MirConstructSliceOp::get_concrete_op_info(),
+        vec![i32_slice_ty.into()],
+        vec![ptr_val, len_val],
+        vec![],
+        0,
+    );
+    assert!(
+        MirConstructSliceOp::new(op_bad_elem).verify(&ctx).is_err(),
+        "Pointee/element mismatch"
+    );
+
+    // Invalid: operands swapped (length where the pointer should be)
+    let op_swapped = Operation::new(
+        &mut ctx,
+        MirConstructSliceOp::get_concrete_op_info(),
+        vec![u8_slice_ty.into()],
+        vec![len_val, ptr_val],
+        vec![],
+        0,
+    );
+    assert!(
+        MirConstructSliceOp::new(op_swapped).verify(&ctx).is_err(),
+        "Swapped operands"
+    );
+
+    // Invalid: result is not a slice type
+    let op_bad_res = Operation::new(
+        &mut ctx,
+        MirConstructSliceOp::get_concrete_op_info(),
+        vec![u8_ptr_ty.into()],
+        vec![ptr_val, len_val],
+        vec![],
+        0,
+    );
+    assert!(
+        MirConstructSliceOp::new(op_bad_res).verify(&ctx).is_err(),
+        "Non-slice result type"
+    );
 }
 
 #[test]

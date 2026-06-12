@@ -241,6 +241,7 @@ compiles a Rust kernel to PTX, launches it on the GPU, and prints
 | `device_ffi_test`    | Device FFI: Rust kernels calling C++ CCCL warp-level reductions via LTOIR|
 | `async_vecadd`       | Async GPU execution with `cuda-async` and `DeviceOperation`              |
 | `cross_crate_kernel` | Library crates defining kernels, bundled into binaries                   |
+| `cuda_module_in_lib` | `#[cuda_module]` in a library crate, loaded by embedded bundle name      |
 
 ```bash
 cargo oxide run vecadd
