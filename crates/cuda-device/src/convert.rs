@@ -19,6 +19,13 @@
 ///
 /// Maps to PTX: `cvt.rn.f16x2.f32 d, hi, lo;`
 ///
+/// Lane placement: the first argument (`lo`) fills bits `[15:0]` and the
+/// second argument (`hi`) fills bits `[31:16]`, even though the PTX
+/// operand list prints `hi` first. This is the same first-arg-low
+/// convention as [`cvt_f32x2_bf16x2`](crate::tcgen05::cvt_f32x2_bf16x2),
+/// which differs only in its destination element type (bf16, not f16)
+/// and its `a`/`b` argument naming.
+///
 /// # Arguments
 /// - `lo`: f32 value for the low 16 bits (bits `[15:0]`)
 /// - `hi`: f32 value for the high 16 bits (bits `[31:16]`)
