@@ -11,8 +11,8 @@ on:
   workflow_call:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref_name }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event_name == 'workflow_call' && 'child' || 'standalone' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
 
 permissions:
   contents: read
