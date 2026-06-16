@@ -46,6 +46,7 @@ and a direct projected assignment, including runtime and literal row indices.
 | `write_nested_slice_row_ref` | `let e = &mut rows[row][0]; *e = v` through fat `&mut [[f32; 2]]` |
 | `write_nested_slice_const_row_ref` | `let e = &mut rows[1][0]; *e = v` through fat `&mut [[f32; 2]]` |
 | `write_nested_slice_row_assign` | `rows[row][0] = v` through fat `&mut [[f32; 2]]` |
+| `write_nested_slice_wide_nonzero_col` | `rows[row][2] = v` through fat `&mut [[f32; 3]]` (wider element, non-zero column) |
 
 Each kernel writes a distinct, index-dependent pattern into a zeroed
 buffer; the host reads everything back and checks every lane, so a write

@@ -3465,6 +3465,15 @@ fn translate_place_addr_from_slot(
     let mut current_is_slice_data = false;
 
     for (proj_idx, elem) in projection.iter().enumerate() {
+        // The slice-data provenance bit only describes the pointer produced by
+        // the immediately-preceding `Deref` of a fat slice (index it by
+        // element, not as a pointer to one array object). Capture it for this
+        // iteration and clear it up front, so the invariant stays local: it is
+        // true only when the previous step handed us a slice DATA pointer, and
+        // no later projection arm can accidentally leak it forward.
+        let entered_as_slice_data = current_is_slice_data;
+        current_is_slice_data = false;
+
         match elem {
             // `*place` -- the place walked so far holds a pointer; the
             // address of the dereferenced place is that pointer VALUE, so a
@@ -3664,7 +3673,6 @@ fn translate_place_addr_from_slot(
                             // the field arm below.
                             mir::ProjectionElem::Field(..) => {
                                 current = data_ptr;
-                                current_is_slice_data = false;
                                 continue;
                             }
                             // Element access through a slice data pointer is
@@ -3724,7 +3732,6 @@ fn translate_place_addr_from_slot(
             }
 
             mir::ProjectionElem::Field(field_idx, field_ty) => {
-                current_is_slice_data = false;
                 let field_type = types::translate_type(ctx, field_ty)?;
                 let result_ptr_ty =
                     dialect_mir::types::MirPtrType::get_generic(ctx, field_type, is_mutable);
@@ -3761,7 +3768,7 @@ fn translate_place_addr_from_slot(
                     Some(kind) => kind,
                     None => return Ok(None),
                 };
-                if current_is_slice_data {
+                if entered_as_slice_data {
                     pointee_kind = PointeeKind::Direct;
                 }
 
@@ -3798,7 +3805,6 @@ fn translate_place_addr_from_slot(
                 );
                 current = next_current;
                 current_prev_op = Some(addr_op);
-                current_is_slice_data = false;
             }
 
             // Runtime `arr[i]` indexing. Without this arm, a place like
@@ -3810,7 +3816,7 @@ fn translate_place_addr_from_slot(
                     Some(kind) => kind,
                     None => return Ok(None),
                 };
-                if current_is_slice_data {
+                if entered_as_slice_data {
                     pointee_kind = PointeeKind::Direct;
                 }
 
@@ -3842,7 +3848,6 @@ fn translate_place_addr_from_slot(
                 );
                 current = next_current;
                 current_prev_op = Some(addr_op);
-                current_is_slice_data = false;
             }
 
             // Enum-variant downcast (`(x as Variant).field`). Addressing an

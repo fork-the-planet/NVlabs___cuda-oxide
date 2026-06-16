@@ -226,6 +226,33 @@ mod kernels {
         let row = ((rows[0][0] as usize) & 1) + 1;
         rows[row][0] = 52.0 + lane as f32;
     }
+
+    /// Nested fat-slice element that is a WIDER array (`[f32; 3]`) written at a
+    /// NON-ZERO inner column. The row index must stride by one whole `[f32; 3]`
+    /// row (3 floats, not 2), then the column index must select column 2 inside
+    /// that row. This pins both the per-element stride and the inner
+    /// array-aware index away from the leading element, the case a
+    /// column-`[0]`-only test would miss.
+    #[kernel]
+    pub fn write_nested_slice_wide_nonzero_col(mut out: DisjointSlice<[[f32; 3]; 2]>) {
+        let idx = thread::index_1d();
+        let lane = idx.get();
+        let matrix = match out.get_mut(idx) {
+            Some(m) => m,
+            None => return,
+        };
+
+        matrix[0][0] = 10.0;
+        matrix[0][1] = 11.0;
+        matrix[0][2] = 12.0;
+        matrix[1][0] = 20.0;
+        matrix[1][1] = 21.0;
+        matrix[1][2] = 22.0;
+
+        let rows: &mut [[f32; 3]] = matrix;
+        let row = ((rows[0][0] as usize) & 1) + 1; // 10 & 1 == 0 -> runtime row 1
+        rows[row][2] = 70.0 + lane as f32; // write row 1, column 2
+    }
 }
 
 /// Launches one `[f32; SIZE]`-shaped kernel on a zeroed buffer and checks
@@ -372,6 +399,35 @@ fn main() {
                 .expect("launch")
         },
     );
+
+    // Wider nested element (`[f32; 3]`) with a non-zero inner column: the row
+    // index must stride by a whole `[f32; 3]` and the column index must land in
+    // column 2, not column 0.
+    {
+        let mut dev = DeviceBuffer::<[[f32; 3]; 2]>::zeroed(&stream, N).unwrap();
+        module
+            .write_nested_slice_wide_nonzero_col(
+                &stream,
+                LaunchConfig::for_num_elems(N as u32),
+                &mut dev,
+            )
+            .expect("launch");
+        let host = dev.to_host_vec(&stream).unwrap();
+        let ok = host.iter().enumerate().all(|(lane, m)| {
+            (m[0][0] - 10.0).abs() < 1e-6
+                && (m[0][1] - 11.0).abs() < 1e-6
+                && (m[0][2] - 12.0).abs() < 1e-6
+                && (m[1][0] - 20.0).abs() < 1e-6
+                && (m[1][1] - 21.0).abs() < 1e-6
+                && (m[1][2] - (70.0 + lane as f32)).abs() < 1e-6
+        });
+        let verdict = if ok { "PASS" } else { "FAIL" };
+        println!(
+            "  {:<30} {verdict}    (elem[0] = {:?})",
+            "write_nested_slice_wide_nonzero_col", host[0]
+        );
+        all_pass &= ok;
+    }
 
     if all_pass {
         println!("\nSUCCESS: all kernels passed");
