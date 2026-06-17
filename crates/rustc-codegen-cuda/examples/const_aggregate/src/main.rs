@@ -55,17 +55,41 @@ mod kernels {
 
     // struct-of-struct const: the 3x3 identity matrix.
     const IDENTITY: Mat3 = Mat3 {
-        r0: Vec3 { x: 1.0, y: 0.0, z: 0.0 },
-        r1: Vec3 { x: 0.0, y: 1.0, z: 0.0 },
-        r2: Vec3 { x: 0.0, y: 0.0, z: 1.0 },
+        r0: Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        r1: Vec3 {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        },
+        r2: Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        },
     };
 
     // struct-of-array-of-struct const.
     const MESH: Mesh = Mesh {
         verts: [
-            Vec3 { x: 1.0, y: 0.0, z: 0.0 },
-            Vec3 { x: 0.0, y: 2.0, z: 0.0 },
-            Vec3 { x: 0.0, y: 0.0, z: 4.0 },
+            Vec3 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Vec3 {
+                x: 0.0,
+                y: 2.0,
+                z: 0.0,
+            },
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 4.0,
+            },
         ],
     };
 

@@ -5306,11 +5306,21 @@ fn translate_struct_constant(
                 let field_bytes = if byte_offset + byte_size <= bytes.len() {
                     &bytes[byte_offset..byte_offset + byte_size]
                 } else {
-                    return input_err!(loc, TranslationErr::unsupported(format!(
-                        "Struct constant has insufficient bytes for aggregate field {}", field_idx)));
+                    return input_err!(
+                        loc,
+                        TranslationErr::unsupported(format!(
+                            "Struct constant has insufficient bytes for aggregate field {}",
+                            field_idx
+                        ))
+                    );
                 };
                 let (v, p) = build_const_from_bytes(
-                    ctx, field_ty_ptr, field_bytes, block_ptr, current_prev_op, loc.clone(),
+                    ctx,
+                    field_ty_ptr,
+                    field_bytes,
+                    block_ptr,
+                    current_prev_op,
+                    loc.clone(),
                 )?;
                 current_prev_op = p;
                 field_values.push(v);
@@ -5515,66 +5525,161 @@ fn build_const_from_bytes(
     loc: Location,
 ) -> TranslationResult<(Value, Option<Ptr<Operation>>)> {
     use pliron::builtin::types::FP32Type;
-    let is_int = { let t = ty_ptr.deref(ctx); t.downcast_ref::<IntegerType>().map(|i| (i.width(), i.signedness())) };
+    let is_int = {
+        let t = ty_ptr.deref(ctx);
+        t.downcast_ref::<IntegerType>()
+            .map(|i| (i.width(), i.signedness()))
+    };
     let is_f32 = { ty_ptr.deref(ctx).is::<FP32Type>() };
-    let struct_fields = { ty_ptr.deref(ctx).downcast_ref::<dialect_mir::types::MirStructType>().map(|st| st.field_types().to_vec()) };
-    let array_info = { let t = ty_ptr.deref(ctx); t.downcast_ref::<dialect_mir::types::MirArrayType>().map(|a| (a.element_type(), a.size() as usize)) };
+    let struct_fields = {
+        ty_ptr
+            .deref(ctx)
+            .downcast_ref::<dialect_mir::types::MirStructType>()
+            .map(|st| st.field_types().to_vec())
+    };
+    let array_info = {
+        let t = ty_ptr.deref(ctx);
+        t.downcast_ref::<dialect_mir::types::MirArrayType>()
+            .map(|a| (a.element_type(), a.size() as usize))
+    };
 
     if let Some((width, signedness)) = is_int {
         use dialect_mir::ops::MirConstantOp;
         let nbytes = (width as usize).div_ceil(8);
         let mut v: u128 = 0;
-        for (i, &b) in bytes.iter().take(nbytes).enumerate() { v |= (b as u128) << (i*8); }
+        for (i, &b) in bytes.iter().take(nbytes).enumerate() {
+            v |= (b as u128) << (i * 8);
+        }
         let int_ty = IntegerType::get(ctx, width, signedness);
         let apint = APInt::from_u128(v, NonZeroUsize::new(width as usize).unwrap());
-        let op = Operation::new(ctx, MirConstantOp::get_concrete_op_info(), vec![int_ty.into()], vec![], vec![], 0);
+        let op = Operation::new(
+            ctx,
+            MirConstantOp::get_concrete_op_info(),
+            vec![int_ty.into()],
+            vec![],
+            vec![],
+            0,
+        );
         op.deref_mut(ctx).set_loc(loc.clone());
-        MirConstantOp::new(op).set_attr_value(ctx, pliron::builtin::attributes::IntegerAttr::new(int_ty, apint));
-        match prev_op { Some(p)=>op.insert_after(ctx,p), None=>op.insert_at_front(block_ptr,ctx) }
+        MirConstantOp::new(op).set_attr_value(
+            ctx,
+            pliron::builtin::attributes::IntegerAttr::new(int_ty, apint),
+        );
+        match prev_op {
+            Some(p) => op.insert_after(ctx, p),
+            None => op.insert_at_front(block_ptr, ctx),
+        }
         return Ok((op.deref(ctx).get_result(0), Some(op)));
     }
     if is_f32 {
         use dialect_mir::ops::MirFloatConstantOp;
-        let fv = f32::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3]]);
-        let op = Operation::new(ctx, MirFloatConstantOp::get_concrete_op_info(), vec![ty_ptr], vec![], vec![], 0);
+        let fv = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let op = Operation::new(
+            ctx,
+            MirFloatConstantOp::get_concrete_op_info(),
+            vec![ty_ptr],
+            vec![],
+            vec![],
+            0,
+        );
         op.deref_mut(ctx).set_loc(loc.clone());
-        MirFloatConstantOp::new(op).set_attr_float_value(ctx, pliron::builtin::attributes::FPSingleAttr::from(fv));
-        match prev_op { Some(p)=>op.insert_after(ctx,p), None=>op.insert_at_front(block_ptr,ctx) }
+        MirFloatConstantOp::new(op)
+            .set_attr_float_value(ctx, pliron::builtin::attributes::FPSingleAttr::from(fv));
+        match prev_op {
+            Some(p) => op.insert_after(ctx, p),
+            None => op.insert_at_front(block_ptr, ctx),
+        }
         return Ok((op.deref(ctx).get_result(0), Some(op)));
     }
     if let Some(fields) = struct_fields {
         use dialect_mir::ops::MirConstructStructOp;
         let mut vals = Vec::with_capacity(fields.len());
-        let mut prev = prev_op; let mut off = 0usize;
+        let mut prev = prev_op;
+        let mut off = 0usize;
         for fty in fields {
-            let sz = constant_storage_size(ctx, fty).ok_or_else(|| input_error_noloc!(TranslationErr::unsupported("aggregate const: field size".to_string())))?;
+            let sz = constant_storage_size(ctx, fty).ok_or_else(|| {
+                input_error_noloc!(TranslationErr::unsupported(
+                    "aggregate const: field size".to_string()
+                ))
+            })?;
             if sz == 0 {
-                let (v,p)=translate_zero_sized_constant_value(ctx, fty, block_ptr, prev, loc.clone())?; vals.push(v); prev=p; continue;
+                let (v, p) =
+                    translate_zero_sized_constant_value(ctx, fty, block_ptr, prev, loc.clone())?;
+                vals.push(v);
+                prev = p;
+                continue;
             }
-            let (v,p)=build_const_from_bytes(ctx, fty, &bytes[off..off+sz], block_ptr, prev, loc.clone())?;
-            vals.push(v); prev=p; off+=sz;
+            let (v, p) = build_const_from_bytes(
+                ctx,
+                fty,
+                &bytes[off..off + sz],
+                block_ptr,
+                prev,
+                loc.clone(),
+            )?;
+            vals.push(v);
+            prev = p;
+            off += sz;
         }
-        let (cv, pp)=cast_struct_fields_to_expected_types(ctx, vals, ty_ptr, block_ptr, prev, loc.clone());
-        let op = Operation::new(ctx, MirConstructStructOp::get_concrete_op_info(), vec![ty_ptr], cv, vec![], 0);
+        let (cv, pp) =
+            cast_struct_fields_to_expected_types(ctx, vals, ty_ptr, block_ptr, prev, loc.clone());
+        let op = Operation::new(
+            ctx,
+            MirConstructStructOp::get_concrete_op_info(),
+            vec![ty_ptr],
+            cv,
+            vec![],
+            0,
+        );
         op.deref_mut(ctx).set_loc(loc.clone());
-        match pp { Some(p)=>op.insert_after(ctx,p), None=>op.insert_at_front(block_ptr,ctx) }
+        match pp {
+            Some(p) => op.insert_after(ctx, p),
+            None => op.insert_at_front(block_ptr, ctx),
+        }
         return Ok((op.deref(ctx).get_result(0), Some(op)));
     }
     if let Some((elem_ty, n)) = array_info {
         use dialect_mir::ops::MirConstructArrayOp;
-        let sz = constant_storage_size(ctx, elem_ty).ok_or_else(|| input_error_noloc!(TranslationErr::unsupported("aggregate const: array elem size".to_string())))?;
+        let sz = constant_storage_size(ctx, elem_ty).ok_or_else(|| {
+            input_error_noloc!(TranslationErr::unsupported(
+                "aggregate const: array elem size".to_string()
+            ))
+        })?;
         let mut vals = Vec::with_capacity(n);
         let mut prev = prev_op;
         for i in 0..n {
-            let (v,p)=build_const_from_bytes(ctx, elem_ty, &bytes[i*sz..i*sz+sz], block_ptr, prev, loc.clone())?;
-            vals.push(v); prev=p;
+            let (v, p) = build_const_from_bytes(
+                ctx,
+                elem_ty,
+                &bytes[i * sz..i * sz + sz],
+                block_ptr,
+                prev,
+                loc.clone(),
+            )?;
+            vals.push(v);
+            prev = p;
         }
-        let op = Operation::new(ctx, MirConstructArrayOp::get_concrete_op_info(), vec![ty_ptr], vals, vec![], 0);
+        let op = Operation::new(
+            ctx,
+            MirConstructArrayOp::get_concrete_op_info(),
+            vec![ty_ptr],
+            vals,
+            vec![],
+            0,
+        );
         op.deref_mut(ctx).set_loc(loc.clone());
-        match prev { Some(p)=>op.insert_after(ctx,p), None=>op.insert_at_front(block_ptr,ctx) }
+        match prev {
+            Some(p) => op.insert_after(ctx, p),
+            None => op.insert_at_front(block_ptr, ctx),
+        }
         return Ok((op.deref(ctx).get_result(0), Some(op)));
     }
-    input_err!(loc, TranslationErr::unsupported("build_const_from_bytes: unsupported aggregate field type".to_string()))
+    input_err!(
+        loc,
+        TranslationErr::unsupported(
+            "build_const_from_bytes: unsupported aggregate field type".to_string()
+        )
+    )
 }
 
 /// Translate an enum constant by reconstructing both its active variant and any
@@ -6096,9 +6201,8 @@ fn translate_zero_sized_constant_value(
         let mut operands = Vec::with_capacity(field_types.len());
         let mut cur_prev = prev_op;
         for fty in field_types {
-            let (v, np) = translate_zero_sized_constant_value(
-                ctx, fty, block_ptr, cur_prev, loc.clone(),
-            )?;
+            let (v, np) =
+                translate_zero_sized_constant_value(ctx, fty, block_ptr, cur_prev, loc.clone())?;
             operands.push(v);
             cur_prev = np;
         }
