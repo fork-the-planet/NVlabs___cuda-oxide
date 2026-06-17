@@ -163,7 +163,71 @@ impl<'a> ModuleExportState<'a> {
             || name.starts_with("llvm.nvvm.shfl")
             // Warp votes
             || name.starts_with("llvm.nvvm.vote")
+            // Warp match collectives (match.{any,all}.sync.*)
+            || name.starts_with("llvm.nvvm.match")
+            // Warp-level barrier (bar.warp.sync). Note the block-level
+            // `barrier` prefix above does not match the `bar.` spelling.
+            || name == "llvm.nvvm.bar.warp.sync"
+            // Active-lane mask query; its result depends on warp convergence.
+            || name == "llvm.nvvm.activemask"
             // Async bulk operations (TMA)
             || name.starts_with("llvm.nvvm.cp.async.bulk")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModuleExportState;
+
+    #[test]
+    fn warp_match_collectives_are_convergent() {
+        // `match.{any,all}.sync.*` are warp collectives: every participating
+        // lane must execute together, so the exported declaration must carry
+        // the `convergent` attribute. These are the exact dotted names produced
+        // when lowering the `match_*_sync_*` ops (underscores -> dots on export).
+        for name in [
+            "llvm.nvvm.match.any.sync.i32",
+            "llvm.nvvm.match.any.sync.i64",
+            "llvm.nvvm.match.all.sync.i32p",
+            "llvm.nvvm.match.all.sync.i64p",
+        ] {
+            assert!(
+                ModuleExportState::is_convergent_intrinsic(name),
+                "{name} should be flagged convergent"
+            );
+        }
+    }
+
+    #[test]
+    fn bar_warp_sync_is_convergent() {
+        // `bar.warp.sync` is a warp-level barrier; the `barrier` prefix used
+        // for block-level barriers does not match the `bar.` spelling, so it
+        // needs its own coverage.
+        assert!(ModuleExportState::is_convergent_intrinsic(
+            "llvm.nvvm.bar.warp.sync"
+        ));
+    }
+
+    #[test]
+    fn activemask_is_convergent() {
+        // `activemask` returns the set of currently converged lanes, so its
+        // result depends on the convergence state and must not be moved.
+        assert!(ModuleExportState::is_convergent_intrinsic(
+            "llvm.nvvm.activemask"
+        ));
+    }
+
+    #[test]
+    fn non_collective_intrinsics_are_not_convergent() {
+        // Plain ALU/special-register intrinsics must NOT be flagged convergent.
+        for name in [
+            "llvm.nvvm.read.ptx.sreg.tid.x",
+            "llvm.nvvm.read.ptx.sreg.laneid",
+        ] {
+            assert!(
+                !ModuleExportState::is_convergent_intrinsic(name),
+                "{name} should not be flagged convergent"
+            );
+        }
     }
 }
