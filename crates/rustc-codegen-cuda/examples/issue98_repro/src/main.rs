@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host_y = vec![1.0f32; 4];
     let dev_x = DeviceBuffer::from_host(&stream, &host_x)?;
     let dev_y = DeviceBuffer::from_host(&stream, &host_y)?;
-    let mut dev_out = DeviceBuffer::from_host(&stream, &vec![0.0f32; 4])?;
+    let mut dev_out = DeviceBuffer::from_host(&stream, &[0.0f32; 4])?;
 
     module.swiglu_libdevice(
         &stream,
@@ -58,8 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             x * s * y
         })
         .collect();
-    for i in 0..4 {
-        assert!((actual[i] - expected[i]).abs() < 1e-5);
+    for (a, e) in actual.iter().zip(expected.iter()) {
+        assert!((a - e).abs() < 1e-5);
     }
     println!("PASS");
     Ok(())
