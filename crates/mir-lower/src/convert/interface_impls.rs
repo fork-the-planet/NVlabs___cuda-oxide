@@ -43,7 +43,8 @@ use dialect_nvvm::ops::{
     CpAsyncBulkTensorG2sTile3dOp, CpAsyncBulkTensorG2sTile4dOp, CpAsyncBulkTensorG2sTile5dOp,
     CpAsyncBulkTensorS2gTile1dOp, CpAsyncBulkTensorS2gTile2dOp, CpAsyncBulkTensorS2gTile3dOp,
     CpAsyncBulkTensorS2gTile4dOp, CpAsyncBulkTensorS2gTile5dOp, CpAsyncBulkWaitGroupOp,
-    CpAsyncBulkWaitGroupReadOp, CvtF16x2F32Op, CvtF32x2Bf16x2Op, Dp2aS32Op, Dp2aU32Op, Dp4aS32Op,
+    CpAsyncBulkWaitGroupReadOp, CvtF16x2F32Op, CvtF32x2Bf16x2Op, CvtRnReluBf16x2F32Op,
+    CvtRnReluF16x2F32Op, CvtRzBf16x2F32Op, CvtRzF16x2F32Op, Dp2aS32Op, Dp2aU32Op, Dp4aS32Op,
     Dp4aU32Op, DsmemReadU32Op, ElectSyncOp, FenceProxyAsyncSharedCtaOp, FmaBf16x2Op, InlinePtxOp,
     MapaSharedClusterOp, MatchAllSyncI32Op, MatchAllSyncI64Op, MatchAnySyncI32Op,
     MatchAnySyncI64Op, MbarrierArriveClusterOp, MbarrierArriveExpectTxSharedOp,
@@ -2376,6 +2377,74 @@ impl MirToLlvmConversion for CvtF16x2F32Op {
         operands_info: &OperandsInfo,
     ) -> Result<()> {
         super::intrinsics::convert::convert_cvt_f16x2_f32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for CvtRzF16x2F32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::convert::convert_cvt_rz_f16x2_f32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for CvtRnReluF16x2F32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::convert::convert_cvt_rn_relu_f16x2_f32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for CvtRnReluBf16x2F32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::convert::convert_cvt_rn_relu_bf16x2_f32(
+            ctx,
+            rewriter,
+            self.get_operation(),
+            operands_info,
+        )
+    }
+}
+
+#[op_interface_impl]
+impl MirToLlvmConversion for CvtRzBf16x2F32Op {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        super::intrinsics::convert::convert_cvt_rz_bf16x2_f32(
             ctx,
             rewriter,
             self.get_operation(),
