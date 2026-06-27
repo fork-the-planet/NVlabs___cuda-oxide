@@ -17,8 +17,9 @@
 //! ## Overview
 //!
 //! `mir-lower` bridges cuda-oxide's Rust-semantic dialect (`dialect-mir`)
-//! to the LLVM dialect. After lowering, the LLVM dialect is exported to
-//! textual LLVM IR (by `llvm-export`) and fed to `llc` for PTX.
+//! to the LLVM dialect. After lowering, ordinary PTX builds go directly to
+//! `llvm-export`. NVVM builds first pass through `nvvm-transforms`, which
+//! adjusts the LLVM module for the selected libNVVM dialect.
 //!
 //! ## Compilation Pipeline Position
 //!

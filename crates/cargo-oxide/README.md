@@ -50,8 +50,10 @@ cargo oxide setup                   # explicitly build the codegen backend
 | `--tui`            | debug                            | Use GDB's TUI interface                         |
 | `--check`          | fmt                              | Check formatting only                           |
 
-`--arch` is required for `emit-ltoir` (LTOIR is architecture-specific); for all other
-commands it is optional and defaults to host GPU auto-detection.
+`--arch` is required for `emit-ltoir` and explicit NVVM IR output because those
+artifacts are architecture-specific. Without an override, `run` detects the
+local GPU, while `build` and `pipeline` use the compiler's feature-based target
+so they remain useful for cross-compilation.
 
 `--no-fmad` disables FMA contraction for kernels that rely on two separate
 roundings (e.g. Dekker's algorithm, 2Sum). Equivalent to `CUDA_OXIDE_NO_FMA=1`.
@@ -112,12 +114,10 @@ cargo oxide emit-ltoir standalone_device_fn --arch sm_100
 cargo oxide emit-ltoir my_simt_crate --arch sm_120 -o build/simt.ltoir
 ```
 
-cuda-oxide currently exports NVVM IR 2.0 (opaque pointers), which libNVVM only
-accepts for `compute_100` and newer (Blackwell+). Targeting an older architecture
-fails in libNVVM while parsing types; `emit-ltoir` detects this and points at the
-typed-pointer export work tracked in
-[#98](https://github.com/NVlabs/cuda-oxide/issues/98). Use `--arch sm_100` or
-newer until that lands.
+cuda-oxide chooses the NVVM IR format from the selected architecture.
+Pre-Blackwell targets use LLVM 7 typed pointers; `compute_100` and newer targets
+use modern opaque pointers. The target is checked before export and recorded
+alongside the artifact so the runtime uses the same format.
 
 ### `cargo oxide pipeline <example>`
 
