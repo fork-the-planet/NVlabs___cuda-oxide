@@ -18,6 +18,7 @@ use pliron::{
         attributes::{FPDoubleAttr, FPSingleAttr, IntegerAttr},
         op_interfaces::{BranchOpInterface, SymbolOpInterface},
         type_interfaces::FunctionTypeInterface,
+        types::IntegerType,
     },
     context::Ptr,
     linked_list::ContainsLinkedList,
@@ -107,18 +108,68 @@ impl<'a> ModuleExportState<'a> {
             // Internal linkage: static storage in the global's address space.
             write!(output, "@{name} = addrspace({address_space}) global ").unwrap();
             self.export_type(ty, output)?;
-            // NVVM forbids initialized shared variables. `undef` denotes
-            // uninitialized shared storage and is required by both legacy and
-            // modern NVVM IR. Keep the ordinary llc/PTX path's historical zero
-            // initializer for compatibility.
-            let initializer = if self.nvvm_ir_dialect.is_some() && address_space == 3 {
-                "undef"
+            if let Some(hex) = global.initializer_hex(self.ctx) {
+                let bytes = decode_hex_initializer(&hex)?;
+                write!(output, " ").unwrap();
+                self.export_byte_initializer(ty, &bytes, output)?;
+                writeln!(output, ", align {alignment}").unwrap();
             } else {
-                "zeroinitializer"
-            };
-            writeln!(output, " {initializer}, align {alignment}").unwrap();
+                // NVVM forbids initialized shared variables. `undef` denotes
+                // uninitialized shared storage and is required by both legacy and
+                // modern NVVM IR. Keep the ordinary llc/PTX path's historical zero
+                // initializer for compatibility.
+                let initializer = if self.nvvm_ir_dialect.is_some() && address_space == 3 {
+                    "undef"
+                } else {
+                    "zeroinitializer"
+                };
+                writeln!(output, " {initializer}, align {alignment}").unwrap();
+            }
         }
 
+        Ok(())
+    }
+
+    /// Render an evaluated Rust allocation without interpreting its contents.
+    ///
+    /// The lowering boundary deliberately represents initialized globals as
+    /// `[N x i8]`. Escaping every byte keeps all bit patterns intact, including
+    /// NaN payloads, and makes Rust padding explicit without teaching this
+    /// exporter Rust's layout rules.
+    fn export_byte_initializer(
+        &self,
+        ty: pliron::r#type::TypeHandle,
+        bytes: &[u8],
+        output: &mut String,
+    ) -> Result<(), String> {
+        let ty_ref = ty.deref(self.ctx);
+        let array_ty = ty_ref
+            .downcast_ref::<crate::types::ArrayType>()
+            .ok_or_else(|| {
+                format!(
+                    "explicit global initializer requires `[N x i8]` storage, found `{}`",
+                    ty_ref.disp(self.ctx)
+                )
+            })?;
+        let elem_ty = array_ty.elem_type();
+        let elem_ref = elem_ty.deref(self.ctx);
+        let is_i8 = elem_ref
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|int_ty| int_ty.width() == 8);
+        if !is_i8 || array_ty.size() != bytes.len() as u64 {
+            return Err(format!(
+                "explicit global initializer has {} bytes but storage type is `{}`; expected `[{} x i8]`",
+                bytes.len(),
+                ty_ref.disp(self.ctx),
+                bytes.len()
+            ));
+        }
+
+        write!(output, "c\"").unwrap();
+        for byte in bytes {
+            write!(output, "\\{byte:02X}").unwrap();
+        }
+        write!(output, "\"").unwrap();
         Ok(())
     }
 
@@ -668,5 +719,27 @@ impl<'a> ModuleExportState<'a> {
             )?;
         }
         Ok(())
+    }
+}
+
+fn decode_hex_initializer(hex: &str) -> Result<Vec<u8>, String> {
+    if !hex.len().is_multiple_of(2) {
+        return Err("global initializer hex string has odd length".to_string());
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for chunk in hex.as_bytes().chunks_exact(2) {
+        let hi = hex_nibble(chunk[0])?;
+        let lo = hex_nibble(chunk[1])?;
+        bytes.push((hi << 4) | lo);
+    }
+    Ok(bytes)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(format!("invalid hex digit {:?}", byte as char)),
     }
 }

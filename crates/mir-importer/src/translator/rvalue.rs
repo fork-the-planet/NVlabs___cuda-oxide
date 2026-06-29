@@ -1783,65 +1783,41 @@ pub fn translate_operand(
             // statics have already been intercepted above and remain addrspace 3.
             // Statics tagged `#[constant]` (detected by the mangled symbol
             // prefix) instead lower into constant memory (addrspace 4).
-            if let Some(static_def) = static_def_from_constant(constant)?
-                && let Some((pointee_ty, is_mutable)) = get_static_pointer_info(&rust_ty)
+            if let Some((pointee_ty, is_mutable)) = get_static_pointer_info(&rust_ty)
+                && let Some(static_target) = static_target_from_constant(constant, loc.clone())?
             {
-                // All device-side statics — `#[constant]` and ordinary — must
-                // currently be zero-initialized. Lowering honored initializers
-                // into PTX `.const` (or `.global`) bytes is on the roadmap;
-                // for now use `ConstantMemory::UNINIT` and populate from host.
-                ensure_zero_initializer(&static_def, loc.clone())?;
-                let is_constant = is_constant_wrapper_type(&pointee_ty);
-
-                // Constants need the linker-visible mangled name (honors
-                // `#[export_name]`) so mir-lower can emit a matching LLVM
-                // symbol that the host resolves via `cuModuleGetGlobal`.
-                // Ordinary statics only need a unique key for in-pass
-                // deduplication, so we take the cheaper definition-path name.
-                let global_key: String = if is_constant {
-                    rustc_public::mir::mono::Instance::from(static_def)
-                        .mangled_name()
-                        .to_string()
-                } else {
-                    static_def.name()
-                };
-
-                let global_ty = types::translate_type(ctx, &pointee_ty)?;
-                let ptr_ty = if is_constant {
-                    dialect_mir::types::MirPtrType::get_constant(ctx, global_ty, is_mutable).into()
-                } else {
-                    dialect_mir::types::MirPtrType::get_global(ctx, global_ty, is_mutable).into()
-                };
-
-                let op = Operation::new(
+                if static_target.byte_offset != 0 {
+                    return input_err!(
+                        loc,
+                        TranslationErr::unsupported(format!(
+                            "constant pointer into device static {} has byte offset {}; cuda-oxide does not yet preserve interior-static pointer addends",
+                            static_target.static_def.name(),
+                            static_target.byte_offset
+                        ))
+                    );
+                }
+                let static_ty = static_target.static_def.ty();
+                let pointee_mir_ty = types::translate_type(ctx, &pointee_ty)?;
+                let static_mir_ty = types::translate_type(ctx, &static_ty)?;
+                if pointee_mir_ty != static_mir_ty {
+                    return input_err!(
+                        loc,
+                        TranslationErr::unsupported(format!(
+                            "constant pointer to device static {} has pointee type {:?}, but the full static has type {:?}; pointers to static subobjects or unsized coercions are not yet supported",
+                            static_target.static_def.name(),
+                            pointee_ty,
+                            static_ty
+                        ))
+                    );
+                }
+                return translate_static_global_pointer(
                     ctx,
-                    MirGlobalAllocOp::get_concrete_op_info(),
-                    vec![ptr_ty],
-                    vec![],
-                    vec![],
-                    0,
+                    &static_target.static_def,
+                    is_mutable,
+                    block_ptr,
+                    prev_op,
+                    loc.clone(),
                 );
-                op.deref_mut(ctx).set_loc(loc);
-
-                let global_alloc = MirGlobalAllocOp::new(op);
-
-                use pliron::builtin::attributes::{StringAttr, TypeAttr};
-                global_alloc.set_attr_global_type(ctx, TypeAttr::new(global_ty));
-                global_alloc.set_attr_global_key(ctx, StringAttr::new(global_key));
-
-                if let Some(alignment) = static_alignment(&static_def)? {
-                    global_alloc.set_alignment_value(ctx, alignment);
-                }
-
-                if let Some(prev) = prev_op {
-                    global_alloc.get_operation().insert_after(ctx, prev);
-                } else {
-                    global_alloc.get_operation().insert_at_front(block_ptr, ctx);
-                }
-
-                let val = global_alloc.get_operation().deref(ctx).get_result(0);
-
-                return Ok((val, Some(global_alloc.get_operation())));
             }
 
             let const_ty_ptr = types::translate_type(ctx, &rust_ty)?;
@@ -4753,9 +4729,10 @@ fn translate_ptr_to_array_constant(
     prev_op: Option<Ptr<Operation>>,
     loc: Location,
 ) -> TranslationResult<(Value, Option<Ptr<Operation>>)> {
-    // Extract array type from the pointer type, then delegate to the shared
-    // value-producing helper. We wrap the resulting value with `MirRefOp` to
-    // recover the pointer.
+    // Extract array type from the pointer type. A pointer-to-array constant can
+    // outlive this function, so lowering it as `array value + mir.ref` would
+    // return a pointer to function-local stack storage. Materialize it as an
+    // immutable device global instead.
     let array_ty = {
         let ty_obj = const_ty_ptr.deref(ctx);
         let ptr_ty = ty_obj
@@ -4781,41 +4758,66 @@ fn translate_ptr_to_array_constant(
         ptr_ty.pointee
     };
 
-    let (array_val, last_op) = translate_array_value_constant_inner(
-        ctx,
-        constant,
-        array_ty,
-        block_ptr,
-        prev_op,
-        loc.clone(),
-    )?;
+    let rust_array_ty = match constant.const_.ty().kind() {
+        rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::RawPtr(pointee, _))
+        | rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Ref(_, pointee, _)) => {
+            pointee
+        }
+        _ => constant.const_.ty(),
+    };
+    if let Some(union_name) = stored_type_union_name(rust_array_ty, &mut Vec::new()) {
+        return input_err!(
+            loc,
+            TranslationErr::unsupported(format!(
+                "promoted array initializer contains union `{union_name}`; initialized union storage is not yet supported"
+            ))
+        );
+    }
 
-    use dialect_mir::ops::MirRefOp;
     use dialect_mir::types::MirPtrType;
+    use pliron::builtin::attributes::{StringAttr, TypeAttr};
 
-    let generic_ptr_ty = MirPtrType::get_generic(ctx, array_ty, false);
+    let expected_size = array_constant_type_byte_size(ctx, array_ty, loc.clone())?;
+    let (bytes, alignment) =
+        promoted_array_initializer(constant, expected_size, "array", loc.clone())?;
+    let initializer_hex = bytes_to_hex(&bytes);
+    let global_key = promoted_constant_dedup_key(ctx, array_ty, &bytes);
+    let global_ptr_ty = MirPtrType::get_global(ctx, array_ty, false);
 
-    let ref_op = Operation::new(
+    let global_op = Operation::new(
         ctx,
-        MirRefOp::get_concrete_op_info(),
-        vec![generic_ptr_ty.into()],
-        vec![array_val],
+        MirGlobalAllocOp::get_concrete_op_info(),
+        vec![global_ptr_ty.into()],
+        vec![],
         vec![],
         0,
     );
-    ref_op.deref_mut(ctx).set_loc(loc);
+    global_op.deref_mut(ctx).set_loc(loc.clone());
 
-    let ref_op_wrapper = MirRefOp::new(ref_op);
-    ref_op_wrapper.set_mutable(ctx, false);
-
-    if let Some(prev) = last_op {
-        ref_op.insert_after(ctx, prev);
-    } else {
-        ref_op.insert_at_front(block_ptr, ctx);
+    let global_alloc = MirGlobalAllocOp::new(global_op);
+    global_alloc.set_attr_global_type(ctx, TypeAttr::new(array_ty));
+    global_alloc.set_attr_global_key(ctx, StringAttr::new(global_key));
+    set_global_initializer_hex_attr(ctx, global_alloc.get_operation(), &initializer_hex);
+    if alignment > 0 {
+        global_alloc.set_alignment_value(ctx, alignment);
     }
 
-    let ptr_val = ref_op.deref(ctx).get_result(0);
-    Ok((ptr_val, Some(ref_op)))
+    if let Some(prev) = prev_op {
+        global_alloc.get_operation().insert_after(ctx, prev);
+    } else {
+        global_alloc.get_operation().insert_at_front(block_ptr, ctx);
+    }
+
+    let global_ptr = global_alloc.get_operation().deref(ctx).get_result(0);
+    let (ptr_val, last_op) = cast_to_generic_addrspace_if_needed(
+        ctx,
+        global_ptr,
+        const_ty_ptr,
+        block_ptr,
+        Some(global_alloc.get_operation()),
+        loc,
+    );
+    Ok((ptr_val, last_op))
 }
 
 /// Lower a bare `MirArrayType` value constant (e.g. `const TABLE: [f32; N] =
@@ -7203,11 +7205,20 @@ fn is_barrier_pointer(ty: &rustc_public::ty::Ty) -> bool {
 
 /// Resolve a constant pointer/reference to the Rust static it points at, if any.
 ///
-/// Null pointers and pointers to anonymous memory allocations deliberately return
-/// `None`; they should continue through normal constant handling.
-fn static_def_from_constant(
+/// The outer allocation also stores the pointer's byte addend. Keep it next to
+/// the target definition so an interior pointer can never silently degrade to
+/// the static's base address. Null pointers and pointers to anonymous memory
+/// allocations deliberately return `None`; they continue through normal
+/// constant handling.
+struct StaticPointerTarget {
+    static_def: rustc_public::mir::mono::StaticDef,
+    byte_offset: u64,
+}
+
+fn static_target_from_constant(
     constant: &mir::ConstOperand,
-) -> TranslationResult<Option<rustc_public::mir::mono::StaticDef>> {
+    loc: Location,
+) -> TranslationResult<Option<StaticPointerTarget>> {
     use rustc_public::mir::alloc::GlobalAlloc;
 
     let ConstantKind::Allocated(alloc) = constant.const_.kind() else {
@@ -7217,53 +7228,199 @@ fn static_def_from_constant(
         return Ok(None);
     }
 
-    let Some((_, prov)) = alloc.provenance.ptrs.first() else {
+    let Some(&(provenance_offset, prov)) = alloc.provenance.ptrs.first() else {
         return Ok(None);
     };
+    if alloc.provenance.ptrs.len() != 1 {
+        return input_err!(
+            loc,
+            TranslationErr::unsupported(format!(
+                "constant pointer contains {} provenance entries; expected one static target",
+                alloc.provenance.ptrs.len()
+            ))
+        );
+    }
+
+    let pointer_width = rustc_public::target::MachineInfo::target_pointer_width().bytes();
+    let byte_offset = alloc
+        .read_partial_uint(provenance_offset..provenance_offset + pointer_width)
+        .map_err(|e| {
+            input_error_noloc!(TranslationErr::unsupported(format!(
+                "Failed to read constant static-pointer addend: {e:?}"
+            )))
+        })? as u64;
 
     match GlobalAlloc::from(prov.0) {
-        GlobalAlloc::Static(static_def) => Ok(Some(static_def)),
+        GlobalAlloc::Static(static_def) => Ok(Some(StaticPointerTarget {
+            static_def,
+            byte_offset,
+        })),
         _ => Ok(None),
     }
 }
 
-/// Ordinary device globals are currently emitted as `zeroinitializer`.
-/// Reject non-zero initializers until constant-data export is implemented.
-fn ensure_zero_initializer(
-    static_def: &rustc_public::mir::mono::StaticDef,
-    loc: Location,
-) -> TranslationResult<()> {
-    let alloc = static_def.eval_initializer().map_err(|e| {
-        input_error_noloc!(TranslationErr::unsupported(format!(
-            "Failed to evaluate initializer for device static {}: {:?}",
-            static_def.name(),
-            e
-        )))
-    })?;
-    let bytes = alloc.raw_bytes().map_err(|e| {
-        input_error_noloc!(TranslationErr::unsupported(format!(
-            "Device static {} has unsupported uninitialized bytes: {:?}",
-            static_def.name(),
-            e
-        )))
-    })?;
+/// The byte image and ABI alignment of a global initializer.
+///
+/// LLVM globals with explicit data are emitted as byte arrays. Keeping the
+/// evaluated allocation as bytes avoids reconstructing Rust layout in the
+/// exporter, which could otherwise change floating-point NaN payloads or put
+/// fields at the wrong offsets.
+struct GlobalInitializerData {
+    bytes: Vec<u8>,
+    alignment: u64,
+}
 
-    if bytes.iter().all(|byte| *byte == 0) {
-        Ok(())
-    } else {
-        input_err!(
+/// Copy one evaluated allocation into a byte-exact global initializer.
+///
+/// Undefined bytes are Rust padding. They do not carry a Rust value, so make
+/// them deterministic zeros in the object image. Pointer provenance is
+/// different: it represents a relocation, not literal zero bytes. Until the
+/// exporter can emit relocations, accepting it would silently turn a valid
+/// pointer into null, so reject it here.
+fn allocation_initializer_data(
+    alloc: &rustc_public::ty::Allocation,
+    description: &str,
+    loc: Location,
+) -> TranslationResult<GlobalInitializerData> {
+    if !alloc.provenance.ptrs.is_empty() {
+        return input_err!(
             loc,
             TranslationErr::unsupported(format!(
-                "Device static {} has a non-zero initializer; cuda-oxide currently supports zero-initialized device statics",
-                static_def.name()
+                "{} contains {} pointer relocation(s); cuda-oxide cannot yet emit pointer provenance in device global initializers",
+                description,
+                alloc.provenance.ptrs.len()
             ))
-        )
+        );
+    }
+
+    Ok(GlobalInitializerData {
+        bytes: alloc.bytes.iter().map(|byte| byte.unwrap_or(0)).collect(),
+        alignment: alloc.align,
+    })
+}
+
+/// Follow the one outer pointer used for a promoted array, then copy the
+/// referenced array allocation into global storage.
+fn promoted_array_initializer(
+    constant: &mir::ConstOperand,
+    expected_size: usize,
+    kind_name: &str,
+    loc: Location,
+) -> TranslationResult<(Vec<u8>, u64)> {
+    use rustc_public::mir::alloc::GlobalAlloc;
+    use rustc_public::ty::TyConstKind;
+
+    fn initializer_from_allocation(
+        alloc: &rustc_public::ty::Allocation,
+        expected_size: usize,
+        kind_name: &str,
+        loc: Location,
+    ) -> TranslationResult<(Vec<u8>, u64)> {
+        let Some(&(provenance_offset, provenance)) = alloc.provenance.ptrs.first() else {
+            let data = allocation_initializer_data(
+                alloc,
+                &format!("promoted {kind_name} initializer"),
+                loc.clone(),
+            )?;
+            if data.bytes.len() != expected_size {
+                return input_err!(
+                    loc,
+                    TranslationErr::unsupported(format!(
+                        "promoted {kind_name} initializer is {} bytes, expected {expected_size}",
+                        data.bytes.len()
+                    ))
+                );
+            }
+            return Ok((data.bytes, data.alignment));
+        };
+
+        if alloc.provenance.ptrs.len() != 1 {
+            return input_err!(
+                loc,
+                TranslationErr::unsupported(format!(
+                    "promoted {kind_name} pointer contains {} provenance entries; expected exactly one backing allocation",
+                    alloc.provenance.ptrs.len()
+                ))
+            );
+        }
+
+        let pointer_width = rustc_public::target::MachineInfo::target_pointer_width().bytes();
+        let target_offset = alloc
+            .read_partial_uint(provenance_offset..provenance_offset + pointer_width)
+            .map_err(|e| {
+                input_error_noloc!(TranslationErr::unsupported(format!(
+                    "Failed to read promoted {kind_name} pointer offset: {e:?}"
+                )))
+            })? as usize;
+
+        let target_alloc = match GlobalAlloc::from(provenance.0) {
+            GlobalAlloc::Memory(target_alloc) => target_alloc,
+            GlobalAlloc::Static(static_def) => static_def.eval_initializer().map_err(|e| {
+                input_error_noloc!(TranslationErr::unsupported(format!(
+                    "Failed to evaluate promoted {kind_name} backing static {}: {e:?}",
+                    static_def.name()
+                )))
+            })?,
+            other => {
+                return input_err!(
+                    loc,
+                    TranslationErr::unsupported(format!(
+                        "promoted {kind_name} provenance points to unsupported allocation {other:?}"
+                    ))
+                );
+            }
+        };
+
+        let data = allocation_initializer_data(
+            &target_alloc,
+            &format!("promoted {kind_name} backing allocation"),
+            loc.clone(),
+        )?;
+        let end = target_offset.checked_add(expected_size).ok_or_else(|| {
+            input_error_noloc!(TranslationErr::unsupported(format!(
+                "promoted {kind_name} initializer offset overflows its allocation"
+            )))
+        })?;
+        let bytes = data.bytes.get(target_offset..end).ok_or_else(|| {
+            input_error_noloc!(TranslationErr::unsupported(format!(
+                "promoted {kind_name} initializer needs bytes {target_offset}..{end}, but its backing allocation is only {} bytes",
+                data.bytes.len()
+            )))
+        })?;
+        Ok((bytes.to_vec(), data.alignment))
+    }
+
+    match constant.const_.kind() {
+        ConstantKind::Allocated(alloc) => {
+            initializer_from_allocation(alloc, expected_size, kind_name, loc)
+        }
+        ConstantKind::Ty(ty_const) => match ty_const.kind() {
+            TyConstKind::Value(_, alloc) => {
+                initializer_from_allocation(alloc, expected_size, kind_name, loc)
+            }
+            TyConstKind::ZSTValue(_) if expected_size == 0 => Ok((Vec::new(), 1)),
+            other => input_err!(
+                loc,
+                TranslationErr::unsupported(format!(
+                    "promoted {kind_name} initializer must be backed by bytes, found TyConstKind::{other:?}"
+                ))
+            ),
+        },
+        ConstantKind::ZeroSized if expected_size == 0 => Ok((Vec::new(), 1)),
+        other => input_err!(
+            loc,
+            TranslationErr::unsupported(format!(
+                "promoted {kind_name} initializer must be allocated, found {other:?}"
+            ))
+        ),
     }
 }
 
-fn static_alignment(
+/// Return rustc's evaluated static initializer bytes and alignment.
+fn static_initializer_data(
     static_def: &rustc_public::mir::mono::StaticDef,
-) -> TranslationResult<Option<u64>> {
+    loc: Location,
+) -> TranslationResult<GlobalInitializerData> {
     let alloc = static_def.eval_initializer().map_err(|e| {
         input_error_noloc!(TranslationErr::unsupported(format!(
             "Failed to evaluate initializer for device static {}: {:?}",
@@ -7271,7 +7428,155 @@ fn static_alignment(
             e
         )))
     })?;
-    Ok((alloc.align > 0).then_some(alloc.align))
+    allocation_initializer_data(&alloc, &format!("device static {}", static_def.name()), loc)
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    hex
+}
+
+fn promoted_constant_dedup_key(ctx: &Context, ty: TypeHandle, bytes: &[u8]) -> String {
+    // This string is only an in-pass map key; it never becomes the emitted
+    // symbol name. Keep the full type and byte image so deduplication is exact.
+    // A short hash would make a collision silently alias two different Rust
+    // constants to the same device global.
+    let ty = ty.deref(ctx).disp(ctx).to_string();
+    let bytes = bytes_to_hex(bytes);
+    format!(
+        "__cuda_oxide_promoted_type{}:{ty}:bytes{}:{bytes}",
+        ty.len(),
+        bytes.len() / 2
+    )
+}
+
+fn translate_static_global_pointer(
+    ctx: &mut Context,
+    static_def: &rustc_public::mir::mono::StaticDef,
+    is_mutable: bool,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    loc: Location,
+) -> TranslationResult<(Value, Option<Ptr<Operation>>)> {
+    let initializer = static_initializer_data(static_def, loc.clone())?;
+    let initializer_hex = bytes_to_hex(&initializer.bytes);
+    let static_ty = static_def.ty();
+    if let Some(union_name) = stored_type_union_name(static_ty, &mut Vec::new()) {
+        return input_err!(
+            loc,
+            TranslationErr::unsupported(format!(
+                "device static {} contains union `{union_name}`; initialized union storage is not yet supported",
+                static_def.name()
+            ))
+        );
+    }
+    let is_constant = is_constant_wrapper_type(&static_ty);
+
+    let global_key: String = if is_constant {
+        rustc_public::mir::mono::Instance::from(*static_def)
+            .mangled_name()
+            .to_string()
+    } else {
+        static_def.name()
+    };
+
+    let global_ty = types::translate_type(ctx, &static_ty)?;
+    let ptr_ty = if is_constant {
+        dialect_mir::types::MirPtrType::get_constant(ctx, global_ty, is_mutable).into()
+    } else {
+        dialect_mir::types::MirPtrType::get_global(ctx, global_ty, is_mutable).into()
+    };
+
+    let op = Operation::new(
+        ctx,
+        MirGlobalAllocOp::get_concrete_op_info(),
+        vec![ptr_ty],
+        vec![],
+        vec![],
+        0,
+    );
+    op.deref_mut(ctx).set_loc(loc);
+
+    let global_alloc = MirGlobalAllocOp::new(op);
+
+    use pliron::builtin::attributes::{StringAttr, TypeAttr};
+    global_alloc.set_attr_global_type(ctx, TypeAttr::new(global_ty));
+    global_alloc.set_attr_global_key(ctx, StringAttr::new(global_key));
+    set_global_initializer_hex_attr(ctx, global_alloc.get_operation(), &initializer_hex);
+
+    if initializer.alignment > 0 {
+        global_alloc.set_alignment_value(ctx, initializer.alignment);
+    }
+
+    if let Some(prev) = prev_op {
+        global_alloc.get_operation().insert_after(ctx, prev);
+    } else {
+        global_alloc.get_operation().insert_at_front(block_ptr, ctx);
+    }
+
+    let val = global_alloc.get_operation().deref(ctx).get_result(0);
+    Ok((val, Some(global_alloc.get_operation())))
+}
+
+/// Return the first union stored inline in `ty`.
+///
+/// Pointer pointees are deliberately not followed: their bytes are not part of
+/// the containing allocation (and non-null pointer provenance is rejected by a
+/// separate check). Arrays, tuples, structs, and enum payloads are inline and
+/// must be searched recursively.
+fn stored_type_union_name(
+    ty: rustc_public::ty::Ty,
+    visited: &mut Vec<rustc_public::ty::Ty>,
+) -> Option<String> {
+    use rustc_public::ty::{AdtKind, RigidTy, TyKind};
+
+    if visited.contains(&ty) {
+        return None;
+    }
+    visited.push(ty);
+
+    match ty.kind() {
+        TyKind::RigidTy(RigidTy::Adt(adt_def, substs)) => {
+            if matches!(adt_def.kind(), AdtKind::Union) {
+                return Some(adt_def.trimmed_name());
+            }
+            for variant in adt_def.variants() {
+                for field in variant.fields() {
+                    if let Some(name) = stored_type_union_name(field.ty_with_args(&substs), visited)
+                    {
+                        return Some(name);
+                    }
+                }
+            }
+            None
+        }
+        TyKind::RigidTy(RigidTy::Array(element, _)) | TyKind::RigidTy(RigidTy::Slice(element)) => {
+            stored_type_union_name(element, visited)
+        }
+        TyKind::RigidTy(RigidTy::Tuple(elements)) => {
+            for element in elements.iter() {
+                if let Some(name) = stored_type_union_name(*element, visited) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn set_global_initializer_hex_attr(ctx: &mut Context, op: Ptr<Operation>, initializer_hex: &str) {
+    use pliron::builtin::attributes::StringAttr;
+    use pliron::identifier::Identifier;
+
+    let key = Identifier::try_new("global_initializer_hex".to_string()).expect("valid identifier");
+    op.deref_mut(ctx)
+        .attributes
+        .set(key, StringAttr::new(initializer_hex.to_string()));
 }
 
 /// Check if a type is a pointer/reference to a static allocation.
