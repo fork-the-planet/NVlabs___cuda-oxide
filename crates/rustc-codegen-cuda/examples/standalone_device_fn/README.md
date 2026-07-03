@@ -19,9 +19,13 @@ Rust device libraries that are consumed by CUDA C++ via LTOIR linking.
 | 5 | `fma_i32` | A second concrete type produces another monomorphization |
 | 6 | `get_global_thread_id` | Device thread-index intrinsics compile |
 | 7 | `mma_m16n8k16_f32_f16_stub` | The public F16 MMA stub reaches the device pipeline |
-| 8 | Exact F16 MMA mnemonic | PTX contains `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32` |
-| 9 | `lerp` absent | An uninstantiated generic is not compiled |
-| 10 | No `.entry` directives | Every emitted symbol is a device `.func`, not a kernel |
+| 8 | `mma_m16n8k8_f32_tf32_raw_stub` | The raw TF32 MMA stub reaches the device pipeline |
+| 9 | `mma_m16n8k8_f32_tf32_from_f32_stub` | The f32-to-TF32 conversion path compiles |
+| 10 | Exact F16 MMA mnemonic | PTX contains `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32` |
+| 11 | Exact TF32 MMA mnemonic | PTX contains `mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32` |
+| 12 | Six TF32 conversions | PTX contains six `cvt.rna.tf32.f32` instructions feeding the MMA |
+| 13 | `lerp` absent | An uninstantiated generic is not compiled |
+| 14 | No `.entry` directives | Every emitted symbol is a device `.func`, not a kernel |
 
 ## How to Run
 
@@ -30,8 +34,8 @@ Rust device libraries that are consumed by CUDA C++ via LTOIR linking.
 cargo oxide run standalone_device_fn --arch sm_80
 ```
 
-The explicit target keeps this regression on the MMA instruction's minimum
-supported architecture and PTX ISA: `sm_80` with PTX 7.0.
+The explicit target keeps these MMA and conversion instructions on their
+minimum supported architecture and PTX ISA: `sm_80` with PTX 7.0.
 
 Expected output:
 
@@ -43,11 +47,15 @@ PTX file: standalone_device_fn.ptx (... bytes)
   PASS  clamp_f32 — Test 1: simple standalone fn
   ...
   PASS  mma_m16n8k16_f32_f16_stub — Test 5: F16 warp-MMA stub
+  PASS  mma_m16n8k8_f32_tf32_raw_stub — Test 5: raw TF32 warp-MMA stub
+  PASS  mma_m16n8k8_f32_tf32_from_f32_stub — Test 5: f32-to-TF32 conversion path
   PASS  exact F16 warp-MMA instruction emitted
+  PASS  exact TF32 warp-MMA instruction emitted
+  PASS  six f32-to-TF32 register conversions emitted
   PASS  lerp absent — Test 3b: uninstantiated generic not compiled
   PASS  No .entry directives (all are .func)
 
-SUCCESS: 10/10 tests passed — all device functions compiled to PTX!
+SUCCESS: 14/14 tests passed — all device functions compiled to PTX!
 ```
 
 ## How It Works
@@ -62,8 +70,9 @@ SUCCESS: 10/10 tests passed — all device functions compiled to PTX!
    names in the final output
 4. Generic `#[device]` functions are only compiled if monomorphized by a
    concrete call site (standard Rust monomorphization rules)
-5. The F16 MMA wrapper forces the public stub through MIR import and lowering;
-   the host then checks the exact PTX instruction text
+5. The F16 and TF32 wrappers force the raw fragments and
+   `cvt.rna.tf32.f32` conversion path through MIR import and lowering; the host
+   checks each exact PTX instruction.
 
 ## Related
 
